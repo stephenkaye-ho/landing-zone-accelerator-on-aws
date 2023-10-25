@@ -680,7 +680,7 @@ export class AcceleratorTool {
         organizationsClient.send(new ListAccountsCommand({ NextToken: nextToken })),
       );
       for (const account of page.Accounts ?? []) {
-        if (account.Id && account.Name) {
+        if (account.Id && account.Name && account.Status !== 'SUSPENDED') {
           accountIds.push({ accountName: account.Name, accountId: account.Id });
         }
       }
