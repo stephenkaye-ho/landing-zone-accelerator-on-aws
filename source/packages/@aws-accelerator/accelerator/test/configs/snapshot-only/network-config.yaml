@@ -271,6 +271,31 @@ centralNetworkServices:
           account: SharedServices
           subnet: SharedServices-App-C
           vpc: SharedServices-Main
+    - name: Accelerator-GWLB-NonDelegated
+      subnets:
+        - SharedServices-App-A
+        - SharedServices-App-B
+      account: SharedServices
+      vpc: SharedServices-Main
+      deletionProtection: true
+      targetGroup: shared-services-target
+      endpoints:
+        - name: Shared-Endpoint-A
+          account: SharedServices
+          subnet: SharedServices-App-A
+          vpc: SharedServices-Main
+        - name: Shared-Endpoint-B
+          account: SharedServices
+          subnet: SharedServices-App-B
+          vpc: SharedServices-Main
+        - name: Shared-Secondary-Endpoint-D
+          account: Network
+          vpc: Network-Secondary
+          subnet: Network-Secondary-D
+        - name: Shared-Secondary-Endpoint-A
+          account: Network
+          vpc: Network-Secondary
+          subnet: Network-Secondary-A
   networkFirewall:
     firewalls:
       - name: accelerator-firewall
@@ -643,13 +668,17 @@ vpcs:
     instanceTenancy: default
     routeTables:
       - name: Network-Secondary-A-Rt
-        routes: []
+        routes:
+          - name: GwlbRoute
+            destination: 10.0.0.0/24
+            type: gatewayLoadBalancerEndpoint
+            target: Shared-Secondary-Endpoint-A
       - name: Network-Secondary-B-Rt
         routes:
-        - name: LgwRoute
-          destination: 0.0.0.0/0
-          type: localGateway
-          target: accelerator-lgw-1
+          - name: LgwRoute
+            destination: 0.0.0.0/0
+            type: localGateway
+            target: accelerator-lgw-1
       - name: Network-Secondary-C-Rt
         routes:
           - name: NfwRoute
@@ -664,6 +693,10 @@ vpcs:
             type: networkFirewall
             target: az-id-firewall
             targetAvailabilityZone: 2
+          - name: GwlbRoute
+            destination: 10.0.0.0/24
+            type: gatewayLoadBalancerEndpoint
+            target: Shared-Secondary-Endpoint-D
     subnets:
       - name: Network-Secondary-A
         availabilityZone: a
@@ -1111,6 +1144,13 @@ vpcs:
                   - Management
               - prefixLists:
                   - accelerator-prefix-list
+          - description: 'IP Protocol Rule'
+            ipProtocols:
+              - ESP
+              - IDRP
+              - ST
+            sources:
+              - 100.96.252.0/23
         outboundRules:
           - description: 'All Outbound'
             types:
@@ -1133,6 +1173,13 @@ vpcs:
               - 22
             udpPorts:
               - 22
+            sources:
+              - 10.0.0.0/8
+          - description: 'IP Protocol Rule'
+            ipProtocols:
+              - ESP
+              - IDRP
+              - ST
             sources:
               - 10.0.0.0/8
       - name: Network-Endpoints-CustomEndpointSg
@@ -1373,6 +1420,14 @@ vpcs:
             destination: 10.0.0.0/8
             type: gatewayLoadBalancerEndpoint
             target: Endpoint-A
+          - name: NetworkInterfaceRoute
+            destination: 10.0.0.0/26
+            type: networkInterface
+            target: ${ACCEL_LOOKUP::EC2:ENI_1:accelerator-firewall}
+          - name: NetworkInterfaceDirectRoute
+            destination: 10.0.0.0/28
+            type: networkInterface
+            target: eni-0123456789abcdeff
       - name: Network-Inspection-Tgw-B
         routes:
           - name: NfwRoute
@@ -1437,6 +1492,34 @@ vpcs:
               - ALL
             sources:
               - 0.0.0.0/0
+    targetGroups:
+      - name: deployed-tg-2
+        port: 443
+        protocol: HTTPS
+        type: instance
+        shareTargets:
+          organizationalUnits:
+            - Infrastructure
+      - name: tg-with-target-ip
+        port: 80
+        protocol: HTTP
+        protocolVersion: HTTP1
+        type: ip
+        healthCheck:
+          enabled: true
+          port: 80
+          protocol: HTTP
+        targets:
+          - '10.3.100.20'
+      - name: tg-without-target-ip
+        port: 80
+        protocol: HTTP
+        protocolVersion: HTTP1
+        type: ip
+        healthCheck:
+          enabled: true
+          port: 80
+          protocol: HTTP
     transitGatewayAttachments:
       - name: Network-Inspection
         transitGateway:
@@ -1494,6 +1577,14 @@ vpcs:
             destination: 10.0.0.0/24
             type: vpcPeering
             target: CrossAccount
+          - name: CrossAcctNetworkInterfaceRoute
+            destination: 10.0.0.0/28
+            type: networkInterface
+            target: ${ACCEL_LOOKUP::EC2:ENI_0:firewall-with-shared-subnet}
+          - name: GwlbRoute
+            destination: 10.1.0.0/24
+            type: gatewayLoadBalancerEndpoint
+            target: Shared-Endpoint-A
       - name: SharedServices-App-B
         routes:
           - name: TgwRoute
@@ -1510,6 +1601,10 @@ vpcs:
             destination: 10.0.0.0/24
             type: vpcPeering
             target: CrossAccount
+          - name: GwlbRoute
+            destination: 10.1.0.0/24
+            type: gatewayLoadBalancerEndpoint
+            target: Shared-Endpoint-B
       - name: SharedServices-App-C
         routes:
           - name: TgwRoute

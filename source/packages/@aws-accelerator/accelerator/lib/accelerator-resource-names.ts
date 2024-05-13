@@ -39,6 +39,7 @@ interface RoleNames {
   crossAccountSsmParameterShare: string;
   assetFunctionRoleName: string;
   firewallConfigFunctionRoleName: string;
+  diagnosticsPackAssumeRoleName: string;
 }
 interface ParameterNames {
   importedCentralLogBucketCmkArn: string;
@@ -59,6 +60,7 @@ interface ParameterNames {
   snsTopicCmkArn: string;
   lambdaCmkArn: string;
   managementCmkArn: string;
+  importedAssetsBucketCmkArn: string;
   assetsBucketCmkArn: string;
   identityCenterInstanceArn: string;
   identityStoreId: string;
@@ -80,7 +82,9 @@ interface CmkDetails {
   lambda: { alias: string; description: string };
   acceleratorKey: { alias: string; description: string };
   managementKey: { alias: string; description: string };
+  importedAssetsBucketCmkArn: { alias: string; description: string };
   assetsBucket: { alias: string; description: string };
+  ssmKey: { alias: string; description: string };
 }
 interface BucketPrefixes {
   assetsAccessLog: string;
@@ -114,6 +118,7 @@ export class AcceleratorResourceNames {
     crossAccountSsmParameterShare: 'PLACE_HOLDER',
     assetFunctionRoleName: 'PLACE_HOLDER',
     firewallConfigFunctionRoleName: 'PLACE_HOLDER',
+    diagnosticsPackAssumeRoleName: 'PLACE_HOLDER',
   };
   public parameters: ParameterNames = {
     importedCentralLogBucketCmkArn: 'PLACE_HOLDER',
@@ -134,6 +139,7 @@ export class AcceleratorResourceNames {
     snsTopicCmkArn: 'PLACE_HOLDER',
     lambdaCmkArn: 'PLACE_HOLDER',
     managementCmkArn: 'PLACE_HOLDER',
+    importedAssetsBucketCmkArn: 'PLACE_HOLDER',
     assetsBucketCmkArn: 'PLACE_HOLDER',
     identityCenterInstanceArn: 'PLACE_HOLDER',
     identityStoreId: 'PLACE_HOLDER',
@@ -155,7 +161,9 @@ export class AcceleratorResourceNames {
     lambda: { alias: 'PLACE_HOLDER', description: 'PLACE_HOLDER' },
     acceleratorKey: { alias: 'PLACE_HOLDER', description: 'PLACE_HOLDER' },
     managementKey: { alias: 'PLACE_HOLDER', description: 'PLACE_HOLDER' },
+    importedAssetsBucketCmkArn: { alias: 'PLACE_HOLDER', description: 'PLACE_HOLDER' },
     assetsBucket: { alias: 'PLACE_HOLDER', description: 'PLACE_HOLDER' },
+    ssmKey: { alias: 'PLACE_HOLDER', description: 'PLACE_HOLDER' },
   };
   public bucketPrefixes: BucketPrefixes = {
     assetsAccessLog: 'PLACE_HOLDER',
@@ -193,6 +201,8 @@ export class AcceleratorResourceNames {
     this.roles.crossAccountSsmParameterShare = props.prefixes.accelerator + '-CrossAccountSsmParameterShare';
     this.roles.assetFunctionRoleName = props.prefixes.accelerator + '-AssetsAccessRole';
     this.roles.firewallConfigFunctionRoleName = props.prefixes.accelerator + '-FirewallConfigAccessRole';
+    // Changing the role name for diagnosticsPackAssumeRoleName will need to be change in diagnostics-pack-stack.ts file, this stack deploys during installer
+    this.roles.diagnosticsPackAssumeRoleName = props.prefixes.accelerator + '-DiagnosticsPackAccessRole';
 
     //
     // SSM Parameter initializations
@@ -217,6 +227,7 @@ export class AcceleratorResourceNames {
     this.parameters.snsTopicCmkArn = props.prefixes.ssmParamName + '/kms/snstopic/key-arn';
     this.parameters.lambdaCmkArn = props.prefixes.ssmParamName + '/kms/lambda/key-arn';
     this.parameters.managementCmkArn = props.prefixes.ssmParamName + '/management/kms/key-arn';
+    this.parameters.importedAssetsBucketCmkArn = props.prefixes.importResourcesSsmParamName + '/assets/kms/key';
     this.parameters.assetsBucketCmkArn = props.prefixes.ssmParamName + '/assets/kms/key';
     this.parameters.identityCenterInstanceArn =
       props.prefixes.ssmParamName + '/organization/security/identity-center/instance-arn';
@@ -285,11 +296,19 @@ export class AcceleratorResourceNames {
       alias: props.prefixes.kmsAlias + '/management/kms/key',
       description: 'AWS Accelerator Management Account Kms Key',
     };
+    this.customerManagedKeys.importedAssetsBucketCmkArn = {
+      alias: props.prefixes.kmsAlias + '/assets/kms/key',
+      description: 'Key used to encrypt solution assets',
+    };
     this.customerManagedKeys.assetsBucket = {
       alias: props.prefixes.kmsAlias + '/assets/kms/key',
       description: 'Key used to encrypt solution assets',
     };
 
+    this.customerManagedKeys.ssmKey = {
+      alias: props.prefixes.kmsAlias + '/sessionmanager-logs/session',
+      description: 'AWS Accelerator Session Manager Session Encryption',
+    };
     //
     // Bucket prefixes initialization
     this.bucketPrefixes.assetsAccessLog = props.prefixes.bucketName + '-assets-logs';

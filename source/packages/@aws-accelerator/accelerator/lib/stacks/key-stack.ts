@@ -42,7 +42,7 @@ export class KeyStack extends AcceleratorStack {
    * Function to create Accelerator Key
    * @param props {@link AcceleratorStackProps}
    */
-  private createAcceleratorKey(props: AcceleratorStackProps): cdk.aws_kms.Key {
+  private createAcceleratorKey(props: AcceleratorStackProps): cdk.aws_kms.IKey {
     const key = new cdk.aws_kms.Key(this, 'AcceleratorKey', {
       alias: this.acceleratorResourceNames.customerManagedKeys.acceleratorKey.alias,
       description: this.acceleratorResourceNames.customerManagedKeys.acceleratorKey.description,
@@ -164,7 +164,7 @@ export class KeyStack extends AcceleratorStack {
       if (props.organizationConfig.enable) {
         role = new cdk.aws_iam.Role(this, 'CrossAccountAcceleratorSsmParamAccessRole', {
           roleName: this.acceleratorResourceNames.roles.crossAccountCmkArnSsmParameterAccess,
-          assumedBy: this.getOrgPrincipals(this.organizationId),
+          assumedBy: this.getOrgPrincipals(this.organizationId, true),
           inlinePolicies: {
             default: new cdk.aws_iam.PolicyDocument({
               statements: [

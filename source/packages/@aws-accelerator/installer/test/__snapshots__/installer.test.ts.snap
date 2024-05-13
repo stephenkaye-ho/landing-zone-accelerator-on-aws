@@ -107,6 +107,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 1`] = `
             "UseExistingConfigRepo",
             "ExistingConfigRepositoryName",
             "ExistingConfigRepositoryBranchName",
+            "EnableDiagnosticsPack",
           ],
         },
       ],
@@ -125,6 +126,9 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 1`] = `
         },
         "EnableApprovalStage": {
           "default": "Enable Approval Stage",
+        },
+        "EnableDiagnosticsPack": {
+          "default": "Enable Diagnostics Pack",
         },
         "ExistingConfigRepositoryBranchName": {
           "default": "Existing Config Repository Branch Name",
@@ -192,6 +196,15 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 1`] = `
       "Description": "Select yes to add a Manual Approval stage to accelerator pipeline",
       "Type": "String",
     },
+    "EnableDiagnosticsPack": {
+      "AllowedValues": [
+        "Yes",
+        "No",
+      ],
+      "Default": "Yes",
+      "Description": "Select Yes if deploying the solution with diagnostics pack enabled. Diagnostics pack enables you to generate root cause reports to potentially diagnose pipeline failures.",
+      "Type": "String",
+    },
     "ExistingConfigRepositoryBranchName": {
       "Default": "",
       "Description": "Specify the branch name of existing CodeCommit repository to pull the accelerator configuration from.",
@@ -217,7 +230,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 1`] = `
     "RepositoryBranchName": {
       "AllowedPattern": ".+",
       "ConstraintDescription": "The repository branch name must not be empty",
-      "Default": "release/v1.5.1",
+      "Default": "release/v1.6.2",
       "Description": "The name of the git branch to use for installation. To determine the branch name, navigate to the Landing Zone Accelerator GitHub branches page and choose the release branch you would like to deploy. Release branch names will align with the semantic versioning of our GitHub releases. New release branches will be available as the open source project is updated with new features.",
       "Type": "String",
     },
@@ -1679,6 +1692,25 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 1`] = `
               },
             },
             {
+              "Name": "INSTALLER_STACK_NAME",
+              "Type": "PLAINTEXT",
+              "Value": "AWSAccelerator-Test-InstallerStack",
+            },
+            {
+              "Name": "ENABLE_DIAGNOSTICS_PACK",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "EnableDiagnosticsPack",
+              },
+            },
+            {
+              "Name": "PIPELINE_ACCOUNT_ID",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "AWS::AccountId",
+              },
+            },
+            {
               "Name": "ENABLE_TESTER",
               "Type": "PLAINTEXT",
               "Value": "true",
@@ -1728,7 +1760,7 @@ phases:
     commands:
       - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
       - if [ ! -z "$MANAGEMENT_ACCOUNT_ID" ] && [ ! -z "$MANAGEMENT_ACCOUNT_ROLE_NAME" ]; then ENABLE_EXTERNAL_PIPELINE_ACCOUNT="yes"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -1740,7 +1772,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 "; then BOOTSTRAPPED_HOME="no"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -1758,6 +1790,11 @@ phases:
                   ],
                 },
                 "; then BOOTSTRAPPED_GLOBAL="no"; fi
+      - ENABLE_DIAGNOSTICS_PACK=",
+                {
+                  "Ref": "EnableDiagnosticsPack",
+                },
+                "
   build:
     commands:
       - cd source
@@ -1768,12 +1805,12 @@ phases:
                 },
                 "" = "aws-cn" ]; then
                           sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
-                          yarn config set registry https://registry.npmmirror.com
+                          set -e && yarn config set registry https://registry.npmmirror.com
                        fi
       - yarn install
       - yarn build
       - cd packages/@aws-accelerator/installer
-      - if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e && if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -1789,7 +1826,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 " --qualifier accel; fi
-      - if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e &&  if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -1812,7 +1849,7 @@ phases:
                 },
                 " --qualifier accel; fi
       - |-
-        if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
+        set -e && if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
                           export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" $(aws sts assume-role --role-arn arn:",
                 {
                   "Ref": "AWS::Partition",
@@ -1893,7 +1930,9 @@ phases:
                             echo "SSM Parameter Found, setting ENABLE_ASEA_MIGRATION to true"
                             export ENABLE_ASEA_MIGRATION=true
                           fi;
-      - yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+      - |-
+        set -e && if [ $ENABLE_DIAGNOSTICS_PACK = "Yes" ]; then
+                        yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage diagnostics-pack --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -1906,7 +1945,21 @@ phases:
                   "Ref": "AWS::Partition",
                 },
                 "
-      - if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
+                      fi
+      - set -e && yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+                {
+                  "Ref": "AWS::AccountId",
+                },
+                " --region ",
+                {
+                  "Ref": "AWS::Region",
+                },
+                " --partition ",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                "
+      - set -e && if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -1917,17 +1970,18 @@ phases:
                 "; fi
   post_build:
     commands:
-      - "inprogress_status_count=$(aws codepipeline get-pipeline-state --name \\"",
+      - |-
+        if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then
+                        inprogress_status_count=$(aws codepipeline get-pipeline-state --name "",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
                     "acceleratorPrefix",
                   ],
                 },
-                "-Pipeline\\" | grep '\\"status\\": \\"InProgress\\"' | grep -v grep | wc -l)"
-      - |-
-        if [ $inprogress_status_count -eq 0 ]; then
-                        aws codepipeline start-pipeline-execution --name "",
+                "-Pipeline" | grep '"status": "InProgress"' | grep -v grep | wc -l) && 
+                        if [ $inprogress_status_count -eq 0 ]; then
+                        set -e && aws codepipeline start-pipeline-execution --name "",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -1935,7 +1989,8 @@ phases:
                   ],
                 },
                 "-Pipeline";
-                        fi
+                          fi
+                       fi
 ",
               ],
             ],
@@ -2716,7 +2771,7 @@ phases:
           ],
         },
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -3481,6 +3536,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 2`] = `
             "UseExistingConfigRepo",
             "ExistingConfigRepositoryName",
             "ExistingConfigRepositoryBranchName",
+            "EnableDiagnosticsPack",
           ],
         },
       ],
@@ -3499,6 +3555,9 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 2`] = `
         },
         "EnableApprovalStage": {
           "default": "Enable Approval Stage",
+        },
+        "EnableDiagnosticsPack": {
+          "default": "Enable Diagnostics Pack",
         },
         "ExistingConfigRepositoryBranchName": {
           "default": "Existing Config Repository Branch Name",
@@ -3566,6 +3625,15 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 2`] = `
       "Description": "Select yes to add a Manual Approval stage to accelerator pipeline",
       "Type": "String",
     },
+    "EnableDiagnosticsPack": {
+      "AllowedValues": [
+        "Yes",
+        "No",
+      ],
+      "Default": "Yes",
+      "Description": "Select Yes if deploying the solution with diagnostics pack enabled. Diagnostics pack enables you to generate root cause reports to potentially diagnose pipeline failures.",
+      "Type": "String",
+    },
     "ExistingConfigRepositoryBranchName": {
       "Default": "",
       "Description": "Specify the branch name of existing CodeCommit repository to pull the accelerator configuration from.",
@@ -3591,7 +3659,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 2`] = `
     "RepositoryBranchName": {
       "AllowedPattern": ".+",
       "ConstraintDescription": "The repository branch name must not be empty",
-      "Default": "release/v1.5.1",
+      "Default": "release/v1.6.2",
       "Description": "The name of the git branch to use for installation. To determine the branch name, navigate to the Landing Zone Accelerator GitHub branches page and choose the release branch you would like to deploy. Release branch names will align with the semantic versioning of our GitHub releases. New release branches will be available as the open source project is updated with new features.",
       "Type": "String",
     },
@@ -5052,6 +5120,25 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 2`] = `
                 ],
               },
             },
+            {
+              "Name": "INSTALLER_STACK_NAME",
+              "Type": "PLAINTEXT",
+              "Value": "AWSAccelerator-Test-InstallerStack",
+            },
+            {
+              "Name": "ENABLE_DIAGNOSTICS_PACK",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "EnableDiagnosticsPack",
+              },
+            },
+            {
+              "Name": "PIPELINE_ACCOUNT_ID",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "AWS::AccountId",
+              },
+            },
           ],
           "Image": "aws/codebuild/standard:6.0",
           "ImagePullCredentialsType": "CODEBUILD",
@@ -5092,7 +5179,7 @@ phases:
     commands:
       - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
       - if [ ! -z "$MANAGEMENT_ACCOUNT_ID" ] && [ ! -z "$MANAGEMENT_ACCOUNT_ROLE_NAME" ]; then ENABLE_EXTERNAL_PIPELINE_ACCOUNT="yes"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -5104,7 +5191,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 "; then BOOTSTRAPPED_HOME="no"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -5122,6 +5209,11 @@ phases:
                   ],
                 },
                 "; then BOOTSTRAPPED_GLOBAL="no"; fi
+      - ENABLE_DIAGNOSTICS_PACK=",
+                {
+                  "Ref": "EnableDiagnosticsPack",
+                },
+                "
   build:
     commands:
       - cd source
@@ -5132,12 +5224,12 @@ phases:
                 },
                 "" = "aws-cn" ]; then
                           sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
-                          yarn config set registry https://registry.npmmirror.com
+                          set -e && yarn config set registry https://registry.npmmirror.com
                        fi
       - yarn install
       - yarn build
       - cd packages/@aws-accelerator/installer
-      - if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e && if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -5153,7 +5245,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 " --qualifier accel; fi
-      - if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e &&  if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -5176,7 +5268,7 @@ phases:
                 },
                 " --qualifier accel; fi
       - |-
-        if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
+        set -e && if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
                           export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" $(aws sts assume-role --role-arn arn:",
                 {
                   "Ref": "AWS::Partition",
@@ -5257,7 +5349,9 @@ phases:
                             echo "SSM Parameter Found, setting ENABLE_ASEA_MIGRATION to true"
                             export ENABLE_ASEA_MIGRATION=true
                           fi;
-      - yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+      - |-
+        set -e && if [ $ENABLE_DIAGNOSTICS_PACK = "Yes" ]; then
+                        yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage diagnostics-pack --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -5270,7 +5364,21 @@ phases:
                   "Ref": "AWS::Partition",
                 },
                 "
-      - if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
+                      fi
+      - set -e && yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+                {
+                  "Ref": "AWS::AccountId",
+                },
+                " --region ",
+                {
+                  "Ref": "AWS::Region",
+                },
+                " --partition ",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                "
+      - set -e && if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -5281,17 +5389,18 @@ phases:
                 "; fi
   post_build:
     commands:
-      - "inprogress_status_count=$(aws codepipeline get-pipeline-state --name \\"",
+      - |-
+        if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then
+                        inprogress_status_count=$(aws codepipeline get-pipeline-state --name "",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
                     "acceleratorPrefix",
                   ],
                 },
-                "-Pipeline\\" | grep '\\"status\\": \\"InProgress\\"' | grep -v grep | wc -l)"
-      - |-
-        if [ $inprogress_status_count -eq 0 ]; then
-                        aws codepipeline start-pipeline-execution --name "",
+                "-Pipeline" | grep '"status": "InProgress"' | grep -v grep | wc -l) && 
+                        if [ $inprogress_status_count -eq 0 ]; then
+                        set -e && aws codepipeline start-pipeline-execution --name "",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -5299,7 +5408,8 @@ phases:
                   ],
                 },
                 "-Pipeline";
-                        fi
+                          fi
+                       fi
 ",
               ],
             ],
@@ -6080,7 +6190,7 @@ phases:
           ],
         },
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -6845,6 +6955,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 3`] = `
             "UseExistingConfigRepo",
             "ExistingConfigRepositoryName",
             "ExistingConfigRepositoryBranchName",
+            "EnableDiagnosticsPack",
           ],
         },
         {
@@ -6876,6 +6987,9 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 3`] = `
         },
         "EnableApprovalStage": {
           "default": "Enable Approval Stage",
+        },
+        "EnableDiagnosticsPack": {
+          "default": "Enable Diagnostics Pack",
         },
         "ExistingConfigRepositoryBranchName": {
           "default": "Existing Config Repository Branch Name",
@@ -6954,6 +7068,15 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 3`] = `
       "Description": "Select yes to add a Manual Approval stage to accelerator pipeline",
       "Type": "String",
     },
+    "EnableDiagnosticsPack": {
+      "AllowedValues": [
+        "Yes",
+        "No",
+      ],
+      "Default": "Yes",
+      "Description": "Select Yes if deploying the solution with diagnostics pack enabled. Diagnostics pack enables you to generate root cause reports to potentially diagnose pipeline failures.",
+      "Type": "String",
+    },
     "ExistingConfigRepositoryBranchName": {
       "Default": "",
       "Description": "Specify the branch name of existing CodeCommit repository to pull the accelerator configuration from.",
@@ -6987,7 +7110,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 3`] = `
     "RepositoryBranchName": {
       "AllowedPattern": ".+",
       "ConstraintDescription": "The repository branch name must not be empty",
-      "Default": "release/v1.5.1",
+      "Default": "release/v1.6.2",
       "Description": "The name of the git branch to use for installation. To determine the branch name, navigate to the Landing Zone Accelerator GitHub branches page and choose the release branch you would like to deploy. Release branch names will align with the semantic versioning of our GitHub releases. New release branches will be available as the open source project is updated with new features.",
       "Type": "String",
     },
@@ -8425,6 +8548,25 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 3`] = `
               },
             },
             {
+              "Name": "INSTALLER_STACK_NAME",
+              "Type": "PLAINTEXT",
+              "Value": "AWSAccelerator-Test-InstallerStack",
+            },
+            {
+              "Name": "ENABLE_DIAGNOSTICS_PACK",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "EnableDiagnosticsPack",
+              },
+            },
+            {
+              "Name": "PIPELINE_ACCOUNT_ID",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "AWS::AccountId",
+              },
+            },
+            {
               "Name": "MANAGEMENT_ACCOUNT_ID",
               "Type": "PLAINTEXT",
               "Value": {
@@ -8492,7 +8634,7 @@ phases:
     commands:
       - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
       - if [ ! -z "$MANAGEMENT_ACCOUNT_ID" ] && [ ! -z "$MANAGEMENT_ACCOUNT_ROLE_NAME" ]; then ENABLE_EXTERNAL_PIPELINE_ACCOUNT="yes"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -8504,7 +8646,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 "; then BOOTSTRAPPED_HOME="no"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -8522,6 +8664,11 @@ phases:
                   ],
                 },
                 "; then BOOTSTRAPPED_GLOBAL="no"; fi
+      - ENABLE_DIAGNOSTICS_PACK=",
+                {
+                  "Ref": "EnableDiagnosticsPack",
+                },
+                "
   build:
     commands:
       - cd source
@@ -8532,12 +8679,12 @@ phases:
                 },
                 "" = "aws-cn" ]; then
                           sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
-                          yarn config set registry https://registry.npmmirror.com
+                          set -e && yarn config set registry https://registry.npmmirror.com
                        fi
       - yarn install
       - yarn build
       - cd packages/@aws-accelerator/installer
-      - if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e && if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -8553,7 +8700,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 " --qualifier accel; fi
-      - if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e &&  if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -8576,7 +8723,7 @@ phases:
                 },
                 " --qualifier accel; fi
       - |-
-        if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
+        set -e && if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
                           export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" $(aws sts assume-role --role-arn arn:",
                 {
                   "Ref": "AWS::Partition",
@@ -8657,7 +8804,9 @@ phases:
                             echo "SSM Parameter Found, setting ENABLE_ASEA_MIGRATION to true"
                             export ENABLE_ASEA_MIGRATION=true
                           fi;
-      - yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+      - |-
+        set -e && if [ $ENABLE_DIAGNOSTICS_PACK = "Yes" ]; then
+                        yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage diagnostics-pack --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -8670,7 +8819,21 @@ phases:
                   "Ref": "AWS::Partition",
                 },
                 "
-      - if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
+                      fi
+      - set -e && yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+                {
+                  "Ref": "AWS::AccountId",
+                },
+                " --region ",
+                {
+                  "Ref": "AWS::Region",
+                },
+                " --partition ",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                "
+      - set -e && if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -8681,19 +8844,21 @@ phases:
                 "; fi
   post_build:
     commands:
-      - "inprogress_status_count=$(aws codepipeline get-pipeline-state --name \\"",
+      - |-
+        if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then
+                        inprogress_status_count=$(aws codepipeline get-pipeline-state --name "",
                 {
                   "Ref": "AcceleratorQualifier",
                 },
-                "-pipeline\\" | grep '\\"status\\": \\"InProgress\\"' | grep -v grep | wc -l)"
-      - |-
-        if [ $inprogress_status_count -eq 0 ]; then
-                        aws codepipeline start-pipeline-execution --name "",
+                "-pipeline" | grep '"status": "InProgress"' | grep -v grep | wc -l) && 
+                        if [ $inprogress_status_count -eq 0 ]; then
+                        set -e && aws codepipeline start-pipeline-execution --name "",
                 {
                   "Ref": "AcceleratorQualifier",
                 },
                 "-pipeline";
-                        fi
+                          fi
+                       fi
 ",
               ],
             ],
@@ -9485,7 +9650,7 @@ phases:
           ],
         },
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -10232,6 +10397,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 4`] = `
             "UseExistingConfigRepo",
             "ExistingConfigRepositoryName",
             "ExistingConfigRepositoryBranchName",
+            "EnableDiagnosticsPack",
           ],
         },
         {
@@ -10263,6 +10429,9 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 4`] = `
         },
         "EnableApprovalStage": {
           "default": "Enable Approval Stage",
+        },
+        "EnableDiagnosticsPack": {
+          "default": "Enable Diagnostics Pack",
         },
         "ExistingConfigRepositoryBranchName": {
           "default": "Existing Config Repository Branch Name",
@@ -10341,6 +10510,15 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 4`] = `
       "Description": "Select yes to add a Manual Approval stage to accelerator pipeline",
       "Type": "String",
     },
+    "EnableDiagnosticsPack": {
+      "AllowedValues": [
+        "Yes",
+        "No",
+      ],
+      "Default": "Yes",
+      "Description": "Select Yes if deploying the solution with diagnostics pack enabled. Diagnostics pack enables you to generate root cause reports to potentially diagnose pipeline failures.",
+      "Type": "String",
+    },
     "ExistingConfigRepositoryBranchName": {
       "Default": "",
       "Description": "Specify the branch name of existing CodeCommit repository to pull the accelerator configuration from.",
@@ -10374,7 +10552,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 4`] = `
     "RepositoryBranchName": {
       "AllowedPattern": ".+",
       "ConstraintDescription": "The repository branch name must not be empty",
-      "Default": "release/v1.5.1",
+      "Default": "release/v1.6.2",
       "Description": "The name of the git branch to use for installation. To determine the branch name, navigate to the Landing Zone Accelerator GitHub branches page and choose the release branch you would like to deploy. Release branch names will align with the semantic versioning of our GitHub releases. New release branches will be available as the open source project is updated with new features.",
       "Type": "String",
     },
@@ -11812,6 +11990,25 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 4`] = `
               },
             },
             {
+              "Name": "INSTALLER_STACK_NAME",
+              "Type": "PLAINTEXT",
+              "Value": "AWSAccelerator-Test-InstallerStack",
+            },
+            {
+              "Name": "ENABLE_DIAGNOSTICS_PACK",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "EnableDiagnosticsPack",
+              },
+            },
+            {
+              "Name": "PIPELINE_ACCOUNT_ID",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "AWS::AccountId",
+              },
+            },
+            {
               "Name": "MANAGEMENT_ACCOUNT_ID",
               "Type": "PLAINTEXT",
               "Value": {
@@ -11869,7 +12066,7 @@ phases:
     commands:
       - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
       - if [ ! -z "$MANAGEMENT_ACCOUNT_ID" ] && [ ! -z "$MANAGEMENT_ACCOUNT_ROLE_NAME" ]; then ENABLE_EXTERNAL_PIPELINE_ACCOUNT="yes"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -11881,7 +12078,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 "; then BOOTSTRAPPED_HOME="no"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -11899,6 +12096,11 @@ phases:
                   ],
                 },
                 "; then BOOTSTRAPPED_GLOBAL="no"; fi
+      - ENABLE_DIAGNOSTICS_PACK=",
+                {
+                  "Ref": "EnableDiagnosticsPack",
+                },
+                "
   build:
     commands:
       - cd source
@@ -11909,12 +12111,12 @@ phases:
                 },
                 "" = "aws-cn" ]; then
                           sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
-                          yarn config set registry https://registry.npmmirror.com
+                          set -e && yarn config set registry https://registry.npmmirror.com
                        fi
       - yarn install
       - yarn build
       - cd packages/@aws-accelerator/installer
-      - if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e && if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -11930,7 +12132,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 " --qualifier accel; fi
-      - if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e &&  if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -11953,7 +12155,7 @@ phases:
                 },
                 " --qualifier accel; fi
       - |-
-        if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
+        set -e && if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
                           export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" $(aws sts assume-role --role-arn arn:",
                 {
                   "Ref": "AWS::Partition",
@@ -12034,7 +12236,9 @@ phases:
                             echo "SSM Parameter Found, setting ENABLE_ASEA_MIGRATION to true"
                             export ENABLE_ASEA_MIGRATION=true
                           fi;
-      - yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+      - |-
+        set -e && if [ $ENABLE_DIAGNOSTICS_PACK = "Yes" ]; then
+                        yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage diagnostics-pack --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -12047,7 +12251,21 @@ phases:
                   "Ref": "AWS::Partition",
                 },
                 "
-      - if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
+                      fi
+      - set -e && yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+                {
+                  "Ref": "AWS::AccountId",
+                },
+                " --region ",
+                {
+                  "Ref": "AWS::Region",
+                },
+                " --partition ",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                "
+      - set -e && if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -12058,19 +12276,21 @@ phases:
                 "; fi
   post_build:
     commands:
-      - "inprogress_status_count=$(aws codepipeline get-pipeline-state --name \\"",
+      - |-
+        if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then
+                        inprogress_status_count=$(aws codepipeline get-pipeline-state --name "",
                 {
                   "Ref": "AcceleratorQualifier",
                 },
-                "-pipeline\\" | grep '\\"status\\": \\"InProgress\\"' | grep -v grep | wc -l)"
-      - |-
-        if [ $inprogress_status_count -eq 0 ]; then
-                        aws codepipeline start-pipeline-execution --name "",
+                "-pipeline" | grep '"status": "InProgress"' | grep -v grep | wc -l) && 
+                        if [ $inprogress_status_count -eq 0 ]; then
+                        set -e && aws codepipeline start-pipeline-execution --name "",
                 {
                   "Ref": "AcceleratorQualifier",
                 },
                 "-pipeline";
-                        fi
+                          fi
+                       fi
 ",
               ],
             ],
@@ -12862,7 +13082,7 @@ phases:
           ],
         },
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -13609,6 +13829,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 5`] = `
             "UseExistingConfigRepo",
             "ExistingConfigRepositoryName",
             "ExistingConfigRepositoryBranchName",
+            "EnableDiagnosticsPack",
           ],
         },
         {
@@ -13640,6 +13861,9 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 5`] = `
         },
         "EnableApprovalStage": {
           "default": "Enable Approval Stage",
+        },
+        "EnableDiagnosticsPack": {
+          "default": "Enable Diagnostics Pack",
         },
         "ExistingConfigRepositoryBranchName": {
           "default": "Existing Config Repository Branch Name",
@@ -13718,6 +13942,15 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 5`] = `
       "Description": "Select yes to add a Manual Approval stage to accelerator pipeline",
       "Type": "String",
     },
+    "EnableDiagnosticsPack": {
+      "AllowedValues": [
+        "Yes",
+        "No",
+      ],
+      "Default": "Yes",
+      "Description": "Select Yes if deploying the solution with diagnostics pack enabled. Diagnostics pack enables you to generate root cause reports to potentially diagnose pipeline failures.",
+      "Type": "String",
+    },
     "ExistingConfigRepositoryBranchName": {
       "Default": "",
       "Description": "Specify the branch name of existing CodeCommit repository to pull the accelerator configuration from.",
@@ -13751,7 +13984,7 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 5`] = `
     "RepositoryBranchName": {
       "AllowedPattern": ".+",
       "ConstraintDescription": "The repository branch name must not be empty",
-      "Default": "release/v1.5.1",
+      "Default": "release/v1.6.2",
       "Description": "The name of the git branch to use for installation. To determine the branch name, navigate to the Landing Zone Accelerator GitHub branches page and choose the release branch you would like to deploy. Release branch names will align with the semantic versioning of our GitHub releases. New release branches will be available as the open source project is updated with new features.",
       "Type": "String",
     },
@@ -15189,6 +15422,25 @@ exports[`InstallerStack Stack(installer):  Snapshot Test 5`] = `
               },
             },
             {
+              "Name": "INSTALLER_STACK_NAME",
+              "Type": "PLAINTEXT",
+              "Value": "AWSAccelerator-Test-InstallerStack",
+            },
+            {
+              "Name": "ENABLE_DIAGNOSTICS_PACK",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "EnableDiagnosticsPack",
+              },
+            },
+            {
+              "Name": "PIPELINE_ACCOUNT_ID",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "AWS::AccountId",
+              },
+            },
+            {
               "Name": "MANAGEMENT_ACCOUNT_ID",
               "Type": "PLAINTEXT",
               "Value": {
@@ -15251,7 +15503,7 @@ phases:
     commands:
       - ENABLE_EXTERNAL_PIPELINE_ACCOUNT="no"
       - if [ ! -z "$MANAGEMENT_ACCOUNT_ID" ] && [ ! -z "$MANAGEMENT_ACCOUNT_ROLE_NAME" ]; then ENABLE_EXTERNAL_PIPELINE_ACCOUNT="yes"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -15263,7 +15515,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 "; then BOOTSTRAPPED_HOME="no"; fi
-      - if ! aws cloudformation describe-stacks --stack-name ",
+      - set -e && if ! aws cloudformation describe-stacks --stack-name ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -15281,6 +15533,11 @@ phases:
                   ],
                 },
                 "; then BOOTSTRAPPED_GLOBAL="no"; fi
+      - ENABLE_DIAGNOSTICS_PACK=",
+                {
+                  "Ref": "EnableDiagnosticsPack",
+                },
+                "
   build:
     commands:
       - cd source
@@ -15291,12 +15548,12 @@ phases:
                 },
                 "" = "aws-cn" ]; then
                           sed -i "s#registry.yarnpkg.com#registry.npmmirror.com#g" yarn.lock;
-                          yarn config set registry https://registry.npmmirror.com
+                          set -e && yarn config set registry https://registry.npmmirror.com
                        fi
       - yarn install
       - yarn build
       - cd packages/@aws-accelerator/installer
-      - if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e && if [ "$BOOTSTRAPPED_HOME" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -15312,7 +15569,7 @@ phases:
                   "Ref": "AWS::Region",
                 },
                 " --qualifier accel; fi
-      - if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
+      - set -e &&  if [ "$BOOTSTRAPPED_GLOBAL" = "no" ]; then yarn run cdk bootstrap --toolkitStackName ",
                 {
                   "Fn::GetAtt": [
                     "ResourceNamePrefixesGetPrefixResource96A10E6E",
@@ -15335,7 +15592,7 @@ phases:
                 },
                 " --qualifier accel; fi
       - |-
-        if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
+        set -e && if [ $ENABLE_EXTERNAL_PIPELINE_ACCOUNT = "yes" ]; then
                           export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s" $(aws sts assume-role --role-arn arn:",
                 {
                   "Ref": "AWS::Partition",
@@ -15416,7 +15673,9 @@ phases:
                             echo "SSM Parameter Found, setting ENABLE_ASEA_MIGRATION to true"
                             export ENABLE_ASEA_MIGRATION=true
                           fi;
-      - yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+      - |-
+        set -e && if [ $ENABLE_DIAGNOSTICS_PACK = "Yes" ]; then
+                        yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage diagnostics-pack --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -15429,7 +15688,21 @@ phases:
                   "Ref": "AWS::Partition",
                 },
                 "
-      - if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
+                      fi
+      - set -e && yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage pipeline --account ",
+                {
+                  "Ref": "AWS::AccountId",
+                },
+                " --region ",
+                {
+                  "Ref": "AWS::Region",
+                },
+                " --partition ",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                "
+      - set -e && if [ "$ENABLE_TESTER" = "true" ]; then yarn run ts-node --transpile-only cdk.ts deploy --require-approval never --stage tester-pipeline --account ",
                 {
                   "Ref": "AWS::AccountId",
                 },
@@ -15440,19 +15713,21 @@ phases:
                 "; fi
   post_build:
     commands:
-      - "inprogress_status_count=$(aws codepipeline get-pipeline-state --name \\"",
+      - |-
+        if [ $CODEBUILD_BUILD_SUCCEEDING -eq 1 ]; then
+                        inprogress_status_count=$(aws codepipeline get-pipeline-state --name "",
                 {
                   "Ref": "AcceleratorQualifier",
                 },
-                "-pipeline\\" | grep '\\"status\\": \\"InProgress\\"' | grep -v grep | wc -l)"
-      - |-
-        if [ $inprogress_status_count -eq 0 ]; then
-                        aws codepipeline start-pipeline-execution --name "",
+                "-pipeline" | grep '"status": "InProgress"' | grep -v grep | wc -l) && 
+                        if [ $inprogress_status_count -eq 0 ]; then
+                        set -e && aws codepipeline start-pipeline-execution --name "",
                 {
                   "Ref": "AcceleratorQualifier",
                 },
                 "-pipeline";
-                        fi
+                          fi
+                       fi
 ",
               ],
             ],
@@ -16244,7 +16519,7 @@ phases:
           ],
         },
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },

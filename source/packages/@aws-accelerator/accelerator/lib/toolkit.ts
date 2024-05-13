@@ -34,10 +34,13 @@ import {
   OrganizationConfig,
 } from '@aws-accelerator/config';
 import { getReplacementsConfig } from '../utils/app-utils';
-import { createLogger, getCloudFormationTemplate, printStackDiff } from '@aws-accelerator/utils';
+import { createLogger } from '@aws-accelerator/utils/lib/logger';
+import { getCloudFormationTemplate } from '@aws-accelerator/utils/lib/get-template';
+import { getAllFilesInPattern, checkDiffFiles } from '@aws-accelerator/utils/lib/common-functions';
+import { printStackDiff } from '@aws-accelerator/utils/lib/diff-stack';
 import { isBeforeBootstrapStage } from '../utils/app-utils';
 
-import { Accelerator, AcceleratorStackNames } from './accelerator';
+import { AcceleratorStackNames } from './accelerator';
 import { AcceleratorStage } from './accelerator-stage';
 import { isIncluded } from './stacks/custom-stack';
 
@@ -62,6 +65,10 @@ interface Tag {
   readonly Key: string;
   readonly Value: string;
 }
+export type CustomizationStackRunOrder = {
+  stackName: string;
+  runOrder: number;
+};
 
 /**
  * Accelerator extended CDK toolkit properties
@@ -157,6 +164,10 @@ export interface AcceleratorToolkitProps {
    * - security stack for macie and guard duty
    */
   centralLogsBucketKmsKeyArn?: string;
+  /**
+   * Accelerator qualifier used for external deployment
+   */
+  qualifier?: string;
 }
 
 /**
@@ -398,14 +409,21 @@ export class AcceleratorToolkit {
   }
 
   /**
-   * Function to initialize PIPELINE and TESTER PIPELINE stack name
+   * Function to initialize stack name which are not dependent on config, such as  PIPELINE, TESTER PIPELINE and DIAGNOSTICS_PACK stack name
+   * @param stageName {@link AcceleratorStage}
    * @param props
    * @returns
    */
-  private static getPipelineAndTesterPipelineStackName(
+  public static getNonConfigDependentStackName(
     stageName: AcceleratorStage,
     props: { stage: string; accountId?: string; region?: string },
   ) {
+    if (stageName === AcceleratorStage.DIAGNOSTICS_PACK) {
+      return process.env['ACCELERATOR_QUALIFIER']
+        ? `${process.env['ACCELERATOR_QUALIFIER']}-DiagnosticsPackStack-${props.accountId}-${props.region}`
+        : `${AcceleratorStackNames[props.stage]}-${props.accountId}-${props.region}`;
+    }
+
     return process.env['ACCELERATOR_QUALIFIER']
       ? `${process.env['ACCELERATOR_QUALIFIER']}-${stageName}-stack-${props.accountId}-${props.region}`
       : `${AcceleratorStackNames[props.stage]}-${props.accountId}-${props.region}`;
@@ -429,7 +447,7 @@ export class AcceleratorToolkit {
    * Function to get customizations stack names
    * @param stackNames string[]
    * @param options {@link AcceleratorToolkitProps}
-   * @returns
+   * @returns customizationStackNames string[]
    */
   private static async getCustomizationsStackNames(
     stackNames: string[],
@@ -438,11 +456,11 @@ export class AcceleratorToolkit {
     const configDirPath = AcceleratorToolkit.validateAndGetConfigDirectory(options.configDirPath);
 
     if (fs.existsSync(path.join(configDirPath, CustomizationsConfig.FILENAME))) {
-      await Accelerator.getManagementAccountCredentials(options.partition);
       const accountsConfig = AccountsConfig.load(configDirPath);
       const homeRegion = GlobalConfig.loadRawGlobalConfig(configDirPath).homeRegion;
+      const isOrgsEnabled = OrganizationConfig.loadRawOrganizationsConfig(configDirPath).enable;
       const replacementsConfig = getReplacementsConfig(configDirPath, accountsConfig);
-      await replacementsConfig.loadReplacementValues({ region: homeRegion });
+      await replacementsConfig.loadReplacementValues({ region: homeRegion }, isOrgsEnabled);
       const organizationConfig = OrganizationConfig.load(configDirPath, replacementsConfig);
       await accountsConfig.loadAccountIds(
         options.partition,
@@ -482,6 +500,51 @@ export class AcceleratorToolkit {
   }
 
   /**
+   * Function to get the runOrder of custom stacks
+   * @param options {@link AcceleratorToolkitProps}
+   * @returns customizationsStackRunOrderData CustomizationStackRunOrder[]
+   */
+  private static async getCustomizationsStackRunOrder(
+    options: AcceleratorToolkitProps,
+  ): Promise<CustomizationStackRunOrder[]> {
+    const customizationsStackRunOrderData: CustomizationStackRunOrder[] = [];
+    const configDirPath = AcceleratorToolkit.validateAndGetConfigDirectory(options.configDirPath);
+
+    if (fs.existsSync(path.join(configDirPath, CustomizationsConfig.FILENAME))) {
+      const accountsConfig = AccountsConfig.load(configDirPath);
+      const homeRegion = GlobalConfig.loadRawGlobalConfig(configDirPath).homeRegion;
+      const isOrgsEnabled = OrganizationConfig.loadRawOrganizationsConfig(configDirPath).enable;
+      const replacementsConfig = getReplacementsConfig(configDirPath, accountsConfig);
+      await replacementsConfig.loadReplacementValues({ region: homeRegion }, isOrgsEnabled);
+      const organizationConfig = OrganizationConfig.load(configDirPath, replacementsConfig);
+      await accountsConfig.loadAccountIds(
+        options.partition,
+        options.enableSingleAccountMode,
+        organizationConfig.enable,
+        accountsConfig,
+      );
+
+      const customizationsConfig = CustomizationsConfig.load(configDirPath, replacementsConfig);
+      const customStacks = customizationsConfig.getCustomStacks();
+      for (const stack of customStacks) {
+        const deploymentAccts = accountsConfig.getAccountIdsFromDeploymentTarget(stack.deploymentTargets);
+        const deploymentRegions = stack.regions.map(a => a.toString());
+        if (deploymentRegions.includes(options.region!) && deploymentAccts.includes(options.accountId!)) {
+          customizationsStackRunOrderData.push({
+            stackName: `${stack.name}-${options.accountId}-${options.region}`,
+            runOrder: stack.runOrder,
+          });
+        }
+      }
+    }
+    logger.debug(
+      `Sorted customization stack: ${JSON.stringify(
+        customizationsStackRunOrderData.sort((a, b) => a.runOrder - b.runOrder),
+      )}`,
+    );
+    return customizationsStackRunOrderData.sort((a, b) => a.runOrder - b.runOrder);
+  }
+  /**
    * Function to deploy stacks
    * @param cli {@link CdkToolkit}
    * @param toolkitStackName string
@@ -489,7 +552,6 @@ export class AcceleratorToolkit {
    */
   private static async deployStacks(context: string[], toolkitStackName: string, options: AcceleratorToolkitProps) {
     const stackName = await AcceleratorToolkit.getStackNames(options);
-
     let roleArn;
     if (!isBeforeBootstrapStage(options.command, options.stage)) {
       roleArn = getDeploymentRoleArn({
@@ -499,10 +561,74 @@ export class AcceleratorToolkit {
         partition: options.partition,
       });
     }
-    const deployPromises: Promise<void>[] = [];
-    for (const stack of stackName) {
-      deployPromises.push(AcceleratorToolkit.runDeployStackCli(context, options, stack, toolkitStackName, roleArn));
+
+    if (
+      // stage is customizations
+      options.stage === AcceleratorStage.CUSTOMIZATIONS &&
+      // there are stacks in customizations which have runOrder
+      (await AcceleratorToolkit.getCustomizationsStackRunOrder(options)).length > 0
+    ) {
+      const getStackNameRunOrder = await AcceleratorToolkit.getCustomizationsStackRunOrder(options);
+      await AcceleratorToolkit.deployCustomizationStacksWithRunOrder(
+        getStackNameRunOrder,
+        context,
+        options,
+        toolkitStackName,
+        roleArn,
+      );
+    } else {
+      const deployPromises: Promise<void>[] = [];
+      for (const stack of stackName) {
+        deployPromises.push(AcceleratorToolkit.runDeployStackCli(context, options, stack, toolkitStackName, roleArn));
+      }
+      await Promise.all(deployPromises);
     }
+  }
+
+  /**
+   * Function to deploy custom stacks with runOrder
+   * This function takes all the custom stacks for a particular account and region
+   * It finds the lowestRunOrder and deploys that first
+   * Repeats the above step recursively until no stacks are left to deploy
+   * @param stackData {@link CustomizationStackRunOrder[]}
+   * @param context string[]
+   * @param options {@link AcceleratorToolkitProps}
+   * @param toolkitStackName string
+   * @param roleArn string
+   * @returns Promise<void>
+   *
+   */
+  private static async deployCustomizationStacksWithRunOrder(
+    stackData: CustomizationStackRunOrder[],
+    context: string[],
+    options: AcceleratorToolkitProps,
+    toolkitStackName: string,
+    roleArn: string | undefined,
+  ) {
+    // set first run order index;
+    let runOrderIndex = stackData[0].runOrder;
+    const deployPromises: Promise<void>[] = [];
+    for (const stack of stackData) {
+      // If the run order has changed, deploy previous stacks.
+      if (runOrderIndex !== stack.runOrder) {
+        await Promise.all(deployPromises);
+        deployPromises.length = 0;
+        runOrderIndex = stack.runOrder;
+      }
+      deployPromises.push(
+        AcceleratorToolkit.runDeployStackCli(context, options, stack.stackName, toolkitStackName, roleArn),
+      );
+    }
+    // Execute customization stack, regardless of runOrder customizations stack must be executed if present
+    deployPromises.push(
+      AcceleratorToolkit.runDeployStackCli(
+        context,
+        options,
+        `${AcceleratorStackNames[AcceleratorStage.CUSTOMIZATIONS]}-${options.accountId}-${options.region}`,
+        toolkitStackName,
+        roleArn,
+      ),
+    );
     await Promise.all(deployPromises);
   }
 
@@ -531,7 +657,7 @@ export class AcceleratorToolkit {
     switch (options.stage) {
       case AcceleratorStage.PIPELINE:
         stackName = [
-          AcceleratorToolkit.getPipelineAndTesterPipelineStackName(AcceleratorStage.PIPELINE, {
+          AcceleratorToolkit.getNonConfigDependentStackName(AcceleratorStage.PIPELINE, {
             stage: options.stage,
             accountId: options.accountId,
             region: options.region,
@@ -540,7 +666,16 @@ export class AcceleratorToolkit {
         break;
       case AcceleratorStage.TESTER_PIPELINE:
         stackName = [
-          AcceleratorToolkit.getPipelineAndTesterPipelineStackName(AcceleratorStage.TESTER_PIPELINE, {
+          AcceleratorToolkit.getNonConfigDependentStackName(AcceleratorStage.TESTER_PIPELINE, {
+            stage: options.stage,
+            accountId: options.accountId,
+            region: options.region,
+          }),
+        ];
+        break;
+      case AcceleratorStage.DIAGNOSTICS_PACK:
+        stackName = [
+          AcceleratorToolkit.getNonConfigDependentStackName(AcceleratorStage.DIAGNOSTICS_PACK, {
             stage: options.stage,
             accountId: options.accountId,
             region: options.region,
@@ -560,11 +695,15 @@ export class AcceleratorToolkit {
         break;
       case AcceleratorStage.NETWORK_ASSOCIATIONS:
         stackName = [
-          `${AcceleratorStackNames[AcceleratorStage.NETWORK_ASSOCIATIONS]}-${options.accountId}-${options.region}`,
           `${AcceleratorStackNames[AcceleratorStage.NETWORK_ASSOCIATIONS_GWLB]}-${options.accountId}-${options.region}`,
         ];
         break;
       case AcceleratorStage.CUSTOMIZATIONS:
+        stackName.push(
+          `${AcceleratorStackNames[AcceleratorStage.RESOURCE_POLICY_ENFORCEMENT]}-${options.accountId}-${
+            options.region
+          }`,
+        );
         stackName = await AcceleratorToolkit.getCustomizationsStackNames(stackName, options);
         break;
       case AcceleratorStage.IMPORT_ASEA_RESOURCES:
@@ -646,13 +785,15 @@ export class AcceleratorToolkit {
     const selector: StackSelector = {
       patterns: [stack],
     };
-    const changeSetName = `${stack}-change-set`;
     await cli
       .deploy({
         selector,
         toolkitStackName,
         requireApproval: options.requireApproval,
-        changeSetName: changeSetName,
+        deploymentMethod: {
+          method: 'change-set',
+          changeSetName: `${stack}-change-set`,
+        },
         hotswap: HotswapMode.FULL_DEPLOYMENT,
         tags: options.tags,
         roleArn: roleArn,
@@ -665,20 +806,36 @@ export class AcceleratorToolkit {
   private static async runDiffStackCli(options: AcceleratorToolkitProps, stack: string) {
     const saveDirectory = await AcceleratorToolkit.setOutputDirectory(options, stack);
     const savePath = path.join(__dirname, '..', saveDirectory!);
+    const stacksInFolder = await getAllFilesInPattern(savePath, '.template.json');
+
     const roleName = GlobalConfig.loadRawGlobalConfig(options.configDirPath!).managementAccountAccessRole;
 
-    await getCloudFormationTemplate(options.accountId!, options.region!, options.partition!, stack, savePath, roleName);
-    const stream = fs.createWriteStream(path.join(savePath, `${stack}.diff`), { flags: 'w' });
-    await stream.write(`\nStack: ${stack} \n`);
-    await printStackDiff(
-      path.join(savePath, `${stack}.json`),
-      path.join(savePath, `${stack}.template.json`),
-      false,
-      3,
-      false,
-      stream,
-    );
-    await stream.close();
+    for (const eachStack of stacksInFolder) {
+      logger.debug(
+        `Running diff for stack ${eachStack} in stage ${options.stage} for account ${options.accountId} in region ${options.region}`,
+      );
+      await getCloudFormationTemplate(
+        options.accountId!,
+        options.region!,
+        options.partition!,
+        options.stage,
+        eachStack,
+        savePath,
+        roleName,
+      );
+      const stream = fs.createWriteStream(path.join(savePath, `${eachStack}.diff`), { flags: 'w' });
+      await stream.write(`\nStack: ${stack} \n`);
+      await printStackDiff(
+        path.join(savePath, `${eachStack}.json`),
+        path.join(savePath, `${eachStack}.template.json`),
+        false,
+        3,
+        false,
+        stream,
+      );
+      await stream.close();
+    }
+    await checkDiffFiles(savePath, '.template.json', '.diff');
   }
 
   private static async setOutputDirectory(
@@ -687,6 +844,8 @@ export class AcceleratorToolkit {
   ): Promise<string | undefined> {
     if (
       options.stage === AcceleratorStage.PIPELINE ||
+      options.stage === AcceleratorStage.TESTER_PIPELINE ||
+      options.stage === AcceleratorStage.DIAGNOSTICS_PACK ||
       options.stage === AcceleratorStage.IMPORT_ASEA_RESOURCES ||
       options.stage === AcceleratorStage.POST_IMPORT_ASEA_RESOURCES
     ) {

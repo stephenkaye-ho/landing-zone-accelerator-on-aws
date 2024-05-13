@@ -330,6 +330,16 @@ exports[`MultiOuOrganizationsStack Construct(OrganizationsStack):  Snapshot Test
                   "Sid": "AuditManagerEnableOrganizationAdminAccountTaskDetectiveActions",
                 },
                 {
+                  "Action": [
+                    "iam:CreateServiceLinkedRole",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    "*",
+                  ],
+                  "Sid": "ServiceLinkedRoleDetective",
+                },
+                {
                   "Action": "kms:CreateGrant",
                   "Condition": {
                     "Bool": {
@@ -344,16 +354,6 @@ exports[`MultiOuOrganizationsStack Construct(OrganizationsStack):  Snapshot Test
                     "Ref": "SsmParameterValueacceleratorkmscloudwatchkeyarnC96584B6F00A464EAD1953AFF4B05118Parameter",
                   },
                   "Sid": "AuditManagerEnableKmsKeyGrants",
-                },
-                {
-                  "Action": [
-                    "iam:CreateServiceLinkedRole",
-                  ],
-                  "Effect": "Allow",
-                  "Resource": [
-                    "*",
-                  ],
-                  "Sid": "ServiceLinkedRoleDetective",
                 },
               ],
               "Version": "2012-10-17",
@@ -3199,7 +3199,7 @@ exports[`MultiOuOrganizationsStack Construct(OrganizationsStack):  Snapshot Test
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-OrganizationsStack-111111111111-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -3564,6 +3564,16 @@ exports[`OrganizationsStack Construct(OrganizationsStack):  Snapshot Test 1`] = 
                   "Sid": "AuditManagerEnableOrganizationAdminAccountTaskDetectiveActions",
                 },
                 {
+                  "Action": [
+                    "iam:CreateServiceLinkedRole",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    "*",
+                  ],
+                  "Sid": "ServiceLinkedRoleDetective",
+                },
+                {
                   "Action": "kms:CreateGrant",
                   "Condition": {
                     "Bool": {
@@ -3578,16 +3588,6 @@ exports[`OrganizationsStack Construct(OrganizationsStack):  Snapshot Test 1`] = 
                     "Ref": "SsmParameterValueacceleratorkmscloudwatchkeyarnC96584B6F00A464EAD1953AFF4B05118Parameter",
                   },
                   "Sid": "AuditManagerEnableKmsKeyGrants",
-                },
-                {
-                  "Action": [
-                    "iam:CreateServiceLinkedRole",
-                  ],
-                  "Effect": "Allow",
-                  "Resource": [
-                    "*",
-                  ],
-                  "Sid": "ServiceLinkedRoleDetective",
                 },
               ],
               "Version": "2012-10-17",
@@ -6963,7 +6963,7 @@ exports[`OrganizationsStack Construct(OrganizationsStack):  Snapshot Test 1`] = 
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-OrganizationsStack-111111111111-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -7314,6 +7314,16 @@ exports[`delegatedAdminStack Construct(OrganizationsStack):  Snapshot Test 1`] =
                   "Sid": "AuditManagerEnableOrganizationAdminAccountTaskDetectiveActions",
                 },
                 {
+                  "Action": [
+                    "iam:CreateServiceLinkedRole",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": [
+                    "*",
+                  ],
+                  "Sid": "ServiceLinkedRoleDetective",
+                },
+                {
                   "Action": "kms:CreateGrant",
                   "Condition": {
                     "Bool": {
@@ -7328,16 +7338,6 @@ exports[`delegatedAdminStack Construct(OrganizationsStack):  Snapshot Test 1`] =
                     "Ref": "SsmParameterValueacceleratorkmscloudwatchkeyarnC96584B6F00A464EAD1953AFF4B05118Parameter",
                   },
                   "Sid": "AuditManagerEnableKmsKeyGrants",
-                },
-                {
-                  "Action": [
-                    "iam:CreateServiceLinkedRole",
-                  ],
-                  "Effect": "Allow",
-                  "Resource": [
-                    "*",
-                  ],
-                  "Sid": "ServiceLinkedRoleDetective",
                 },
               ],
               "Version": "2012-10-17",
@@ -10691,7 +10691,7 @@ exports[`delegatedAdminStack Construct(OrganizationsStack):  Snapshot Test 1`] =
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-OrganizationsStack-111111111111-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },

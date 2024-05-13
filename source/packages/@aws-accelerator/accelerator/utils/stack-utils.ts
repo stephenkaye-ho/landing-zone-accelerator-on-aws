@@ -23,7 +23,7 @@ import { AcceleratorStackProps } from '../lib/stacks/accelerator-stack';
 import { AccountsStack } from '../lib/stacks/accounts-stack';
 import { ApplicationsStack } from '../lib/stacks/applications-stack';
 import { BootstrapStack } from '../lib/stacks/bootstrap-stack';
-import { CustomStack, customStackMapping, generateCustomStackMappings, isIncluded } from '../lib/stacks/custom-stack';
+import { CustomStack, generateCustomStackMappings, isIncluded } from '../lib/stacks/custom-stack';
 import { CustomizationsStack } from '../lib/stacks/customizations-stack';
 import { DependenciesStack } from '../lib/stacks/dependencies-stack/dependencies-stack';
 import { FinalizeStack } from '../lib/stacks/finalize-stack';
@@ -46,6 +46,9 @@ import { TesterPipelineStack } from '../lib/stacks/tester-pipeline-stack';
 import { AcceleratorContext, AcceleratorEnvironment, AcceleratorResourcePrefixes } from './app-utils';
 import { ImportAseaResourcesStack } from '../lib/stacks/import-asea-resources-stack';
 import { AcceleratorAspects } from '../lib/accelerator-aspects';
+import { ResourcePolicyEnforcementStack } from '../lib/stacks/resource-policy-enforcement-stack';
+import { DiagnosticsPackStack } from '../lib/stacks/diagnostics-pack-stack';
+import { AcceleratorToolkit } from '../lib/toolkit';
 
 const logger = createLogger(['stack-utils']);
 
@@ -164,6 +167,9 @@ function addAcceleratorTags(
   globalConfig: GlobalConfig,
   acceleratorPrefix: string,
 ): void {
+  if (partition === 'aws-iso' || partition === 'aws-iso-b') {
+    return;
+  }
   // Resource types that do not support tag updates
   const excludeResourceTypes = [
     'AWS::EC2::TransitGatewayRouteTable',
@@ -198,7 +204,7 @@ function addAcceleratorTags(
  * @param props
  * @returns
  */
-function includeStage(
+export function includeStage(
   context: AcceleratorContext,
   props: { stage: string; account?: string; region?: string },
 ): boolean {
@@ -234,9 +240,11 @@ export function createPipelineStack(
   resourcePrefixes: AcceleratorResourcePrefixes,
 ) {
   if (includeStage(context, { stage: AcceleratorStage.PIPELINE, account: context.account, region: context.region })) {
-    const pipelineStackName = acceleratorEnv.qualifier
-      ? `${acceleratorEnv.qualifier}-${AcceleratorStage.PIPELINE}-stack-${context.account}-${context.region}`
-      : `${AcceleratorStackNames[AcceleratorStage.PIPELINE]}-${context.account}-${context.region}`;
+    const pipelineStackName = AcceleratorToolkit.getNonConfigDependentStackName(AcceleratorStage.PIPELINE, {
+      stage: context.stage!,
+      accountId: context.account!,
+      region: context.region!,
+    });
     const pipelineStack = new PipelineStack(app, pipelineStackName, {
       env: { account: context.account, region: context.region },
       description: `(SO0199-pipeline) Landing Zone Accelerator on AWS. Version ${version}.`,
@@ -274,9 +282,14 @@ export function createTesterStack(
   ) {
     if (acceleratorEnv.managementCrossAccountRoleName) {
       checkRootApp(rootApp);
-      const testerPipelineStackName = acceleratorEnv.qualifier
-        ? `${acceleratorEnv.qualifier}-${AcceleratorStage.TESTER_PIPELINE}-stack-${context.account}-${context.region}`
-        : `${AcceleratorStackNames[AcceleratorStage.TESTER_PIPELINE]}-${context.account}-${context.region}`;
+      const testerPipelineStackName = AcceleratorToolkit.getNonConfigDependentStackName(
+        AcceleratorStage.TESTER_PIPELINE,
+        {
+          stage: context.stage!,
+          accountId: context.account!,
+          region: context.region!,
+        },
+      );
       const app = new cdk.App({
         outdir: `cdk.out/${testerPipelineStackName}`,
       });
@@ -291,6 +304,50 @@ export function createTesterStack(
       cdk.Aspects.of(testerPipelineStack).add(new AwsSolutionsChecks());
       new AcceleratorAspects(app, context.partition, context.useExistingRoles ?? false);
     }
+  }
+}
+
+/**
+ * Create Diagnostics Pack Stack
+ * @param rootApp
+ * @param context
+ * @param props
+ * @param accountId
+ * @param homeRegion
+ */
+export function createDiagnosticsPackStack(
+  app: cdk.App,
+  context: AcceleratorContext,
+  acceleratorEnv: AcceleratorEnvironment,
+  resourcePrefixes: AcceleratorResourcePrefixes,
+) {
+  if (
+    includeStage(context, {
+      stage: AcceleratorStage.DIAGNOSTICS_PACK,
+      account: context.account,
+      region: context.region,
+    })
+  ) {
+    const diagnosticsPackStackName = AcceleratorToolkit.getNonConfigDependentStackName(
+      AcceleratorStage.DIAGNOSTICS_PACK,
+      {
+        stage: context.stage!,
+        accountId: context.account!,
+        region: context.region!,
+      },
+    );
+    const diagnosticsPackStack = new DiagnosticsPackStack(app, diagnosticsPackStackName, {
+      env: { account: context.account, region: context.region },
+      description: `(SO0199-pipeline) Landing Zone Accelerator on AWS. Version ${version}.`,
+      terminationProtection: true,
+      acceleratorPrefix: resourcePrefixes.accelerator,
+      ssmParamPrefix: resourcePrefixes.ssmParamName,
+      bucketNamePrefix: resourcePrefixes.bucketName,
+      installerStackName: acceleratorEnv.installerStackName,
+      configRepositoryName: acceleratorEnv.configRepositoryName,
+      qualifier: acceleratorEnv.qualifier,
+    });
+    cdk.Aspects.of(diagnosticsPackStack).add(new AwsSolutionsChecks());
   }
 }
 
@@ -934,8 +991,11 @@ export function createNetworkAssociationsStacks(
     const networkAssociationsStackName = `${
       AcceleratorStackNames[AcceleratorStage.NETWORK_ASSOCIATIONS]
     }-${accountId}-${enabledRegion}`;
+    const networkGwlbStackName = `${
+      AcceleratorStackNames[AcceleratorStage.NETWORK_ASSOCIATIONS_GWLB]
+    }-${accountId}-${enabledRegion}`;
     const app = new cdk.App({
-      outdir: `cdk.out/${networkAssociationsStackName}`,
+      outdir: `cdk.out/${networkGwlbStackName}`,
     });
 
     const networkAssociationsStack = new NetworkAssociationsStack(app, `${networkAssociationsStackName}`, {
@@ -947,15 +1007,8 @@ export function createNetworkAssociationsStacks(
     });
     addAcceleratorTags(networkAssociationsStack, context.partition, props.globalConfig, props.prefixes.accelerator);
     cdk.Aspects.of(networkAssociationsStack).add(new AwsSolutionsChecks());
-    new AcceleratorAspects(app, context.partition, context.useExistingRoles ?? false);
 
-    const networkGwlbStackName = `${
-      AcceleratorStackNames[AcceleratorStage.NETWORK_ASSOCIATIONS_GWLB]
-    }-${accountId}-${enabledRegion}`;
-    const appGwlb = new cdk.App({
-      outdir: `cdk.out/${networkGwlbStackName}`,
-    });
-    const networkGwlbStack = new NetworkAssociationsGwlbStack(appGwlb, `${networkGwlbStackName}`, {
+    const networkGwlbStack = new NetworkAssociationsGwlbStack(app, networkGwlbStackName, {
       env,
       description: `(SO0199-networkgwlb) Landing Zone Accelerator on AWS. Version ${version}.`,
       synthesizer: getStackSynthesizer(props, accountId, enabledRegion, context.stage),
@@ -963,8 +1016,10 @@ export function createNetworkAssociationsStacks(
       ...props,
     });
     addAcceleratorTags(networkGwlbStack, context.partition, props.globalConfig, props.prefixes.accelerator);
+    // Since shared security groups are created in networkAssociations. NetworkGwlbStack depends on NetworkAssociationsStack
+    networkGwlbStack.addDependency(networkAssociationsStack);
     cdk.Aspects.of(networkGwlbStack).add(new AwsSolutionsChecks());
-    new AcceleratorAspects(appGwlb, context.partition, context.useExistingRoles ?? false);
+    new AcceleratorAspects(app, context.partition, context.useExistingRoles ?? false);
   }
 }
 
@@ -1007,11 +1062,35 @@ export function createCustomizationsStacks(
       ...props,
     });
     cdk.Aspects.of(customizationsStack).add(new AwsSolutionsChecks());
-    new AcceleratorAspects(app, context.partition, context.useExistingRoles ?? false);
 
     createCustomStacks(app, props, env, accountId, enabledRegion);
 
     createApplicationsStacks(app, context, props, env, accountId, enabledRegion);
+    new AcceleratorAspects(app, context.partition, context.useExistingRoles ?? false);
+
+    const resourcePolicyEnforcementStackName = `${
+      AcceleratorStackNames[AcceleratorStage.RESOURCE_POLICY_ENFORCEMENT]
+    }-${accountId}-${enabledRegion}`;
+
+    const resourcePolicyEnforcementStack = new ResourcePolicyEnforcementStack(
+      app,
+      `${resourcePolicyEnforcementStackName}`,
+      {
+        env,
+        description: `(SO0199-resource-policy-enforcement) Landing Zone Accelerator on AWS. Version ${version}.`,
+        synthesizer: getStackSynthesizer(props, accountId, enabledRegion, context.stage),
+        terminationProtection: props.globalConfig.terminationProtection ?? true,
+        ...props,
+      },
+    );
+    addAcceleratorTags(
+      resourcePolicyEnforcementStack,
+      context.partition,
+      props.globalConfig,
+      props.prefixes.accelerator,
+    );
+    cdk.Aspects.of(resourcePolicyEnforcementStack).add(new AwsSolutionsChecks());
+    new AcceleratorAspects(app, context.partition, context.useExistingRoles ?? false);
   }
 }
 
@@ -1129,8 +1208,7 @@ export function saveAseaResourceMapping(
 
 /**
  * Create custom CloudFormation stacks
- * @param rootApp
- * @param context
+ * @param app
  * @param props
  * @param env
  * @param accountId
@@ -1166,27 +1244,6 @@ function createCustomStacks(
         ssmParamNamePrefix: props.prefixes.ssmParamName,
         ...props,
       });
-      // Create stack dependencies as needed
-      addCustomStackDependencies(stack, stack.stackObj, customStackList);
-    }
-  }
-}
-
-/**
- * Add dependencies to custom stack
- * @param stack
- * @param customStack
- * @param customStackList
- */
-function addCustomStackDependencies(
-  stack: customStackMapping,
-  customStack: cdk.Stack,
-  customStackList: customStackMapping[],
-) {
-  for (const stackName of stack.dependsOn ?? []) {
-    const previousStack = customStackList.find(a => a.stackConfig.name == stackName)?.stackObj;
-    if (previousStack) {
-      customStack.addDependency(previousStack);
     }
   }
 }
@@ -1194,22 +1251,20 @@ function addCustomStackDependencies(
 /**
  * Create custom applications stacks
  * @param rootApp
+ * @param context
  * @param props
  * @param env
  * @param accountId
  * @param enabledRegion
  */
 function createApplicationsStacks(
-  rootApp: cdk.App,
+  app: cdk.App,
   context: AcceleratorContext,
   props: AcceleratorStackProps,
   env: cdk.Environment,
   accountId: string,
   enabledRegion: string,
 ) {
-  const customizationStackName = `${
-    AcceleratorStackNames[AcceleratorStage.CUSTOMIZATIONS]
-  }-${accountId}-${enabledRegion}`;
   for (const application of props.customizationsConfig.applications ?? []) {
     if (
       isIncluded(
@@ -1224,10 +1279,6 @@ function createApplicationsStacks(
       // so the output directory will be customizations folder specific to that account and region
       const applicationStackName = `${props.prefixes.accelerator}-App-${application.name}-${accountId}-${enabledRegion}`;
 
-      checkRootApp(rootApp);
-      const app = new cdk.App({
-        outdir: `cdk.out/${customizationStackName}`,
-      });
       const applicationStack = new ApplicationsStack(app, applicationStackName, {
         env,
         description: `(SO0199-customizations) Landing Zone Accelerator on AWS. Version ${version}.`,

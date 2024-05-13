@@ -17,26 +17,85 @@ import {
   CopyObjectCommand,
   CopyObjectCommandOutput,
   GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   PutObjectCommandOutput,
   S3Client,
 } from '@aws-sdk/client-s3';
 import { FirewallReplacements, VpnConnectionProps, initReplacements } from './replacements';
 
+export interface IStaticReplacements {
+  /**
+   * The key name for the replacement
+   */
+  readonly key: string;
+  /**
+   * The value for the replacement
+   */
+  readonly value: string;
+}
+
+export interface FirewallReplacementOptions {
+  /**
+   * The AWS Partition
+   */
+  readonly partition: string;
+  /**
+   * The name of the S3 asset bucket
+   */
+  readonly assetBucketName: string;
+  /**
+   * The name of the S3 config bucket
+   */
+  readonly configBucketName: string;
+  /**
+   * The VPC ID where the firewall resides
+   */
+  readonly vpcId: string;
+  /**
+   * The key name of the configuration file
+   */
+  readonly configFileKey?: string;
+  /**
+   * The directory of the configuration files
+   */
+  readonly configDir?: string;
+  /**
+   * The hostname of the firewall instance
+   */
+  readonly firewallName?: string;
+  /**
+   * The instance ID of the firewall instance
+   */
+  readonly instanceId?: string;
+  /**
+   * The key name of the license file
+   */
+  readonly licenseFileKey?: string;
+  /**
+   * The name of the role to assume to retrieve cross-account values
+   */
+  readonly roleName?: string;
+  /**
+   * Static replacements
+   */
+  readonly staticReplacements?: IStaticReplacements[];
+  /**
+   * VPN connection details to look up
+   */
+  readonly vpnConnectionProps?: VpnConnectionProps[];
+  /**
+   * Management Account ID used to read Secrets Manager secrets for replacements
+   */
+  readonly managementAccountId?: string;
+}
+
 export async function handler(
   event: AWSLambda.CloudFormationCustomResourceEvent,
 ): Promise<{ Status: string } | undefined> {
   //
-  // Get resource properties and env variables
-  const assetBucketName: string = event.ResourceProperties['assetBucketName'];
-  const configBucketName: string = event.ResourceProperties['configBucketName'];
-  const configFileKey: string | undefined = event.ResourceProperties['configFile'];
-  const firewallName: string | undefined = event.ResourceProperties['firewallName'];
-  const instanceId: string | undefined = event.ResourceProperties['instanceId'];
-  const licenseFileKey: string | undefined = event.ResourceProperties['licenseFile'];
-  const roleName: string | undefined = event.ResourceProperties['roleName'];
-  const vpnConnections: VpnConnectionProps[] | undefined = event.ResourceProperties['vpnConnections'];
-  const vpcId: string = event.ResourceProperties['vpcId'];
+  // Set custom resource options
+  const options = setOptions(event.ResourceProperties);
   //
   // Set up clients
   const ec2Client = new EC2Client({ customUserAgent: process.env['SOLUTION_ID'] });
@@ -48,21 +107,14 @@ export async function handler(
     case 'Update':
       //
       // Copy license file
-      await copyLicenseFile(s3Client, assetBucketName, configBucketName, licenseFileKey);
+      await copyLicenseFile(s3Client, options);
       //
       // Process config file replacements
-      const replacements = configFileKey
-        ? await initReplacements({
-            ec2Client,
-            serviceToken: event.ServiceToken,
-            vpcId,
-            firewallName,
-            instanceId,
-            roleName,
-            vpnConnections,
-          })
-        : undefined;
-      await processConfigFileReplacements(s3Client, assetBucketName, configBucketName, configFileKey, replacements);
+      const replacements =
+        options.configFileKey || options.configDir
+          ? await initReplacements(ec2Client, event.ServiceToken, options)
+          : undefined;
+      await processConfigFileReplacements(s3Client, options, replacements);
 
       return {
         Status: 'SUCCESS',
@@ -78,33 +130,53 @@ export async function handler(
 }
 
 /**
+ * Set firewall replacement options based on event
+ * @param resourceProperties { [key: string]: any }
+ * @returns FirewallReplacementOptions
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function setOptions(resourceProperties: { [key: string]: any }): FirewallReplacementOptions {
+  return {
+    partition: (resourceProperties['ServiceToken'] as string).split(':')[1],
+    assetBucketName: resourceProperties['assetBucketName'] as string,
+    configBucketName: resourceProperties['configBucketName'] as string,
+    vpcId: resourceProperties['vpcId'] as string,
+    configFileKey: (resourceProperties['configFile'] as string) ?? undefined,
+    configDir: (resourceProperties['configDir'] as string) ?? undefined,
+    firewallName: (resourceProperties['firewallName'] as string) ?? undefined,
+    instanceId: (resourceProperties['instanceId'] as string) ?? undefined,
+    licenseFileKey: (resourceProperties['licenseFile'] as string) ?? undefined,
+    roleName: (resourceProperties['roleName'] as string) ?? undefined,
+    staticReplacements: (resourceProperties['staticReplacements'] as IStaticReplacements[]) ?? undefined,
+    vpnConnectionProps: (resourceProperties['vpnConnections'] as VpnConnectionProps[]) ?? undefined,
+    managementAccountId: (resourceProperties['managementAccountId'] as string) ?? undefined,
+  };
+}
+
+/**
  * Copy license file from asset bucket to config bucket
  * @param s3Client S3Client
- * @param assetBucketName string
- * @param configBucketName string
- * @param licenseFileKey string | undefined
+ * @param options FirewallReplacementOptions
  * @returns Promise<CopyObjectCommandOutput | undefined>
  */
 async function copyLicenseFile(
   s3Client: S3Client,
-  assetBucketName: string,
-  configBucketName: string,
-  licenseFileKey?: string,
+  options: FirewallReplacementOptions,
 ): Promise<CopyObjectCommandOutput | undefined> {
-  if (!licenseFileKey) {
+  if (!options.licenseFileKey) {
     return;
   }
 
   console.log(
-    `Copying license file ${licenseFileKey} from bucket s3://${assetBucketName} to s3://${configBucketName}...`,
+    `Copying license file ${options.licenseFileKey} from bucket s3://${options.assetBucketName} to s3://${options.configBucketName}...`,
   );
   try {
     const response = await throttlingBackOff(() =>
       s3Client.send(
         new CopyObjectCommand({
-          CopySource: `${assetBucketName}/${licenseFileKey}`,
-          Bucket: configBucketName,
-          Key: licenseFileKey,
+          CopySource: `${options.assetBucketName}/${options.licenseFileKey}`,
+          Bucket: options.configBucketName,
+          Key: options.licenseFileKey,
         }),
       ),
     );
@@ -118,35 +190,44 @@ async function copyLicenseFile(
 /**
  *
  * @param s3Client S3Client
- * @param assetBucketName string
- * @param configBucketName string
- * @param configFileKey string | undefined
+ * @param options FirewallReplacementOptions
  * @param replacements string | undefined
  * @returns Promise<CopyObjectCommandOutput | undefined>
  */
 async function processConfigFileReplacements(
   s3Client: S3Client,
-  assetBucketName: string,
-  configBucketName: string,
-  configFileKey?: string,
+  options: FirewallReplacementOptions,
   replacements?: FirewallReplacements,
 ): Promise<PutObjectCommandOutput | undefined> {
   //
   // Validate input
-  if (!configFileKey && !replacements) {
+  if ((!options.configFileKey || !options.configDir) && !replacements) {
     return;
-  } else if (configFileKey && !replacements) {
-    throw new Error(`Configuration file S3 key provided but replacements are undefined`);
-  } else if (configFileKey && replacements) {
-    //
-    // Get raw config asset
-    const rawFile = await getRawConfigFile(s3Client, assetBucketName, configFileKey);
-    //
-    // Process replacements
-    const transformedFile = transformConfigFile(replacements, rawFile);
-    //
-    // Put transformed config file
-    return await putTransformedConfigFile(s3Client, configBucketName, transformedFile, configFileKey);
+  } else if ((options.configFileKey || options.configDir) && !replacements) {
+    throw new Error(`Configuration file/directory S3 key provided but replacements are undefined`);
+  } else if ((options.configFileKey || options.configDir) && replacements) {
+    const configFiles = options.configFileKey ? [options.configFileKey] : [];
+    if (options.configDir) {
+      const objs = await s3Client.send(
+        new ListObjectsV2Command({ Bucket: options.assetBucketName, Prefix: options.configDir }),
+      );
+      for (const obj of objs.Contents ?? []) {
+        // Empty folders are ignored here
+        if (obj.Key!.endsWith('/')) continue;
+        configFiles.push(obj.Key!);
+      }
+    }
+    for (const configFileKey of configFiles) {
+      //
+      // Get raw config asset
+      const rawFile = await getRawConfigFile(s3Client, options.assetBucketName, configFileKey);
+      //
+      // Process replacements
+      const transformedFile = await transformConfigFile(replacements, rawFile);
+      //
+      // Put transformed config file
+      await putTransformedConfigFile(s3Client, options.configBucketName, transformedFile, configFileKey);
+    }
   }
   return;
 }
@@ -177,18 +258,19 @@ async function getRawConfigFile(
 
 /**
  * Transform configuration file with replacements
- * @param replacements
- * @param configFile
+ * @param replacements FirewallReplacements
+ * @param configFile string | undefined
  * @returns string
  */
-function transformConfigFile(replacements: FirewallReplacements, configFile?: string): string {
+async function transformConfigFile(replacements: FirewallReplacements, configFile?: string): Promise<string> {
   if (!configFile) {
     throw new Error(`Encountered an error retrieving configuration file from S3`);
   }
   //
   // Process config file replacements
-  const variables = [...new Set(configFile.match(/\$\{ACCEL_LOOKUP::EC2(:[a-z0-9_]+){2}(:.[^}]+){0,1}\}/gi) ?? [])];
-  const replacedVariables = replacements.processReplacements(variables);
+  const lookupRegex = /\${ACCEL_LOOKUP::(EC2|CUSTOM|SECRETS_MANAGER)(:.[^}]+){1,3}}/gi;
+  const variables = [...new Set(configFile.match(lookupRegex) ?? [])];
+  const replacedVariables = await replacements.processReplacements(variables);
   //
   // Transform variables to regex
   const regexVariables = transformVariablesToRegex(variables);

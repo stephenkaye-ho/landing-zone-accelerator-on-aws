@@ -26,10 +26,12 @@ import {
   ApplicationLoadBalancerConfig,
   TargetGroupItemConfig,
   NetworkLoadBalancerConfig,
+  Ec2FirewallInstanceConfig,
+  Ec2FirewallAutoScalingGroupConfig,
 } from '../lib/customizations-config';
 import { GlobalConfig } from '../lib/global-config';
 import { IamConfig } from '../lib/iam-config';
-import { NetworkConfig, NetworkConfigTypes, VpcConfig, VpcTemplatesConfig } from '../lib/network-config';
+import { NetworkConfig, NetworkConfigTypes, SubnetConfig, VpcConfig, VpcTemplatesConfig } from '../lib/network-config';
 import { OrganizationConfig } from '../lib/organization-config';
 import { SecurityConfig } from '../lib/security-config';
 import { CommonValidatorFunctions } from './common/common-validator-functions';
@@ -85,7 +87,7 @@ export class CustomizationsConfigValidator {
     );
 
     // Validate firewalls
-    new FirewallValidator(values, networkConfig, securityConfig, configDir, helpers, errors);
+    new FirewallValidator(values, networkConfig, securityConfig, accountsConfig, configDir, helpers, errors);
 
     if (errors.length) {
       throw new Error(`${CustomizationsConfig.FILENAME} has ${errors.length} issues:\n${errors.join('\n')}`);
@@ -341,13 +343,6 @@ class CustomizationValidator {
       if (!vpcCheck) {
         errors.push(`Application ${app.name}: VPC ${app.vpc} does not exist in file network-config.yaml`);
       } else if (vpcCheck) {
-        this.checkVpcDeploymentTarget(
-          app as AppConfigItem,
-          vpcCheck,
-          configs.accountsConfig,
-          configs.globalConfig,
-          errors,
-        );
         if (app.applicationLoadBalancer) {
           this.checkAlb(
             app.applicationLoadBalancer as ApplicationLoadBalancerConfig,
@@ -387,7 +382,7 @@ class CustomizationValidator {
           );
         }
         this.checkLaunchTemplate(app as AppConfigItem, vpcCheck, helpers, configs.securityConfig, errors);
-        this.checkAutoScaling(app as AppConfigItem, vpcCheck, helpers, errors);
+        this.checkAutoScaling(app as AppConfigItem, vpcCheck, helpers, configs.accountsConfig, errors);
       }
       // Validate file
       if (app.launchTemplate?.userData) {
@@ -470,10 +465,11 @@ class CustomizationValidator {
     app: AppConfigItem,
     vpcCheck: VpcConfig | VpcTemplatesConfig,
     helpers: CustomizationHelperMethods,
+    accountsConfig: AccountsConfig,
     errors: string[],
   ) {
     if (app.autoscaling) {
-      const allTargetGroupNames = app.targetGroups!.map(tg => tg.name);
+      const allTargetGroupNames = app.targetGroups?.map(tg => tg.name);
       const asgTargetGroupNames = app.autoscaling.targetGroups ?? [];
       const compareTargetGroupNames = helpers.compareArrays(asgTargetGroupNames, allTargetGroupNames ?? []);
       if (compareTargetGroupNames.length > 0) {
@@ -482,7 +478,7 @@ class CustomizationValidator {
             app.autoscaling.name
           } has target groups that are not defined in application config. Autoscaling target groups: ${asgTargetGroupNames.join(
             ',',
-          )} all target groups:  ${allTargetGroupNames.join(',')}`,
+          )} all target groups:  ${allTargetGroupNames?.join(',')}`,
         );
       }
       const duplicateAsgSubnets = app.autoscaling.subnets.some(element => {
@@ -495,12 +491,22 @@ class CustomizationValidator {
           }. Subnets: ${app.autoscaling!.subnets.join(',')}`,
         );
       }
-      const asgSubnetsCheck = helpers.checkSubnetsInConfig(app.autoscaling!.subnets, vpcCheck);
+      const asgSubnetsCheck = helpers.checkSubnetsInConfig(app.autoscaling.subnets, vpcCheck);
       if (asgSubnetsCheck === false) {
         errors.push(
-          `Autoscaling group ${app.autoscaling!.name} does not have subnets ${app.autoscaling!.subnets.join(
+          `Autoscaling group ${app.autoscaling.name} does not have subnets ${app.autoscaling!.subnets.join(
             ',',
           )} in VPC ${app.vpc}`,
+        );
+      }
+      if (
+        asgSubnetsCheck &&
+        !this.checkSubnetsTarget(app.autoscaling.subnets, vpcCheck, app.deploymentTargets, accountsConfig, errors)
+      ) {
+        errors.push(
+          `AutoScaling group ${app.autoscaling.name} has subnets ${app.autoscaling.subnets.join(
+            ',',
+          )} which are not created or shared in deploymentTargets`,
         );
       }
     }
@@ -544,16 +550,26 @@ class CustomizationValidator {
         `Network Load Balancer ${nlb.name} does not have subnets ${nlb.subnets.join(',')} in VPC ${appInfo.appVpc}`,
       );
     }
-    const allTargetGroupNames = appInfo.appTargetGroups!.map(tg => tg.name);
-    const nlbTargetGroupNames = nlb.listeners!.map(tg => tg.targetGroup);
+    if (
+      nlbSubnetsCheck &&
+      !this.checkSubnetsTarget(nlb.subnets, vpcCheck, appInfo.deploymentTargets, configs.accountsConfig, errors)
+    ) {
+      errors.push(
+        `Network Load Balancer ${nlb.name} has subnets ${nlb.subnets.join(
+          ',',
+        )} which are not created or shared in deploymentTargets`,
+      );
+    }
+    const allTargetGroupNames = appInfo.appTargetGroups?.map(tg => tg.name);
+    const nlbTargetGroupNames = nlb.listeners?.map(tg => tg.targetGroup);
     const compareTargetGroupNames = helpers.compareArrays(nlbTargetGroupNames ?? [], allTargetGroupNames ?? []);
     if (compareTargetGroupNames.length > 0) {
       errors.push(
         `Network Load Balancer ${
           nlb.name
-        } has target groups that are not defined in application config. NLB target groups: ${nlbTargetGroupNames.join(
+        } has target groups that are not defined in application config. NLB target groups: ${nlbTargetGroupNames?.join(
           ',',
-        )} all target groups:  ${allTargetGroupNames.join(',')}`,
+        )} all target groups:  ${allTargetGroupNames?.join(',')}`,
       );
     }
     const listenerNameCert = (nlb.listeners ?? [])
@@ -622,16 +638,22 @@ class CustomizationValidator {
       );
     }
 
-    const allTargetGroupNames = appInfo.appTargetGroups!.map(tg => tg.name);
-    const albTargetGroupNames = alb.listeners!.map(tg => tg.targetGroup);
+    if (
+      albSubnetsCheck &&
+      !this.checkSubnetsTarget(alb.subnets, vpcCheck, appInfo.deploymentTargets, configs.accountsConfig, errors)
+    ) {
+      errors.push(`Application Load Balancer ${alb.name} have invalid subnets configuration`);
+    }
+    const allTargetGroupNames = appInfo.appTargetGroups?.map(tg => tg.name);
+    const albTargetGroupNames = alb.listeners?.map(tg => tg.targetGroup);
     const compareTargetGroupNames = helpers.compareArrays(albTargetGroupNames ?? [], allTargetGroupNames ?? []);
     if (compareTargetGroupNames.length > 0) {
       errors.push(
         `Application Load Balancer ${
           alb.name
-        } has target groups that are not defined in application config. ALB target groups: ${albTargetGroupNames.join(
+        } has target groups that are not defined in application config. ALB target groups: ${albTargetGroupNames?.join(
           ',',
-        )} all target groups:  ${allTargetGroupNames.join(',')}`,
+        )} all target groups:  ${allTargetGroupNames?.join(',')}`,
       );
     }
     const listenerNameCert = (alb.listeners ?? [])
@@ -826,55 +848,44 @@ class CustomizationValidator {
   }
 
   /**
-   * Function to validate if application deployment targets match to VPC Name or VPC template
-   *
+   * Function to validate if subnet is available by local or shared target in deployment target.
    */
-  private checkVpcDeploymentTarget(
-    app: AppConfigItem,
+  private checkSubnetsTarget(
+    subnets: string[],
     vpcCheck: VpcConfig | VpcTemplatesConfig,
+    deploymentTargets: t.DeploymentTargets,
     accountsConfig: AccountsConfig,
-    globalConfig: GlobalConfig,
     errors: string[],
   ) {
-    // get unique app environments
-    const appDeploymentEnvironments = CommonValidatorFunctions.getEnvironmentsFromDeploymentTarget(
-      accountsConfig,
-      app.deploymentTargets,
-      globalConfig,
+    let isValid = true;
+    const subnetsInConfig: SubnetConfig[] = subnets.map(
+      (subnet: string) => vpcCheck.subnets!.find(item => item.name === subnet)!,
     );
-
-    // container for vpc environments
-    let vpcDeploymentEnvironments: string[];
-
-    if ('deploymentTargets' in vpcCheck) {
-      // get unique app environments
-      const vpcDeploymentAccounts = CommonValidatorFunctions.getAccountNamesFromDeploymentTargets(
+    for (const subnet of subnetsInConfig) {
+      const subnetTargets = new Set([
+        ...CommonValidatorFunctions.getAccountNamesFromTargets(
+          accountsConfig,
+          (subnet.shareTargets ?? {}) as t.ShareTargets,
+        ),
+        ...('deploymentTargets' in vpcCheck
+          ? CommonValidatorFunctions.getAccountNamesFromTargets(accountsConfig, vpcCheck.deploymentTargets)
+          : [vpcCheck.account]),
+      ]);
+      const deploymentTargetAccounts = CommonValidatorFunctions.getAccountNamesFromTargets(
         accountsConfig,
-        vpcCheck.deploymentTargets,
+        deploymentTargets,
       );
-      vpcDeploymentEnvironments = vpcDeploymentAccounts.map(account => `${account}-${vpcCheck.region}`);
-    } else {
-      // standalone vpc only deploys to 1 account/region
-      vpcDeploymentEnvironments = [`${vpcCheck.account}-${vpcCheck.region}`];
-    }
-    // application takes precedence here which means app can be in 2 accounts-regions and vpcTemplate can be in 4 (this has 2 of the app accounts-regions)
-    // however, if app is in 2 and vpcTemplate is not in those 2 then fail.
 
-    const compareAppVpc = CommonValidatorFunctions.compareDeploymentEnvironments(
-      appDeploymentEnvironments,
-      vpcDeploymentEnvironments,
-    );
-
-    if (!compareAppVpc.match && compareAppVpc.message === 'Source length exceeds target') {
-      errors.push(
-        `Application: ${app.name} is being deployed across: ${appDeploymentEnvironments} but vpc ${vpcCheck.name} is only deployed to ${vpcDeploymentEnvironments}`,
-      );
-    } else if (!compareAppVpc.match && compareAppVpc.message === 'Source not in target') {
-      const missingAppEnv = appDeploymentEnvironments.filter(appEnv => !vpcDeploymentEnvironments.includes(appEnv));
-      errors.push(
-        `Application: ${app.name} is being deployed to ${appDeploymentEnvironments} on vpc: ${vpcCheck.name} which is deployed at ${vpcDeploymentEnvironments}. VPC is missing accounts-regions: ${missingAppEnv}`,
-      );
+      for (const targetItem of deploymentTargetAccounts) {
+        if (!subnetTargets.has(targetItem)) {
+          isValid = false;
+          errors.push(
+            `Subnet ${subnet.name} defined in launchTemplate or autoScalingGroup is not created or shared in account ${targetItem}`,
+          );
+        }
+      }
     }
+    return isValid;
   }
 }
 
@@ -1066,26 +1077,28 @@ class FirewallValidator {
     values: CustomizationsConfig,
     networkConfig: NetworkConfig,
     securityConfig: SecurityConfig,
+    accountsConfig: AccountsConfig,
     configDir: string,
     helpers: CustomizationHelperMethods,
     errors: string[],
   ) {
     // Validate firewall instances
-    this.validateFirewalls(values, networkConfig, securityConfig, configDir, helpers, errors);
+    this.validateFirewalls(values, networkConfig, securityConfig, accountsConfig, configDir, helpers, errors);
   }
 
   private validateFirewalls(
     values: CustomizationsConfig,
     networkConfig: NetworkConfig,
     securityConfig: SecurityConfig,
+    accountsConfig: AccountsConfig,
     configDir: string,
     helpers: CustomizationHelperMethods,
     errors: string[],
   ) {
     // Validate firewall instance configs
-    this.validateFirewallInstances(values, helpers, configDir, networkConfig, securityConfig, errors);
+    this.validateFirewallInstances(values, helpers, configDir, networkConfig, securityConfig, accountsConfig, errors);
     // Validate firewall ASG configs
-    this.validateFirewallAsgs(values, helpers, configDir, networkConfig, securityConfig, errors);
+    this.validateFirewallAsgs(values, helpers, configDir, networkConfig, securityConfig, accountsConfig, errors);
     // Validate firewall target groups
     this.validateFirewallTargetGroups(values, helpers, errors);
   }
@@ -1105,6 +1118,7 @@ class FirewallValidator {
     configDir: string,
     networkConfig: NetworkConfig,
     securityConfig: SecurityConfig,
+    accountsConfig: AccountsConfig,
     errors: string[],
   ) {
     const firewallInstances = [...(values.firewalls?.instances ?? []), ...(values.firewalls?.managerInstances ?? [])];
@@ -1125,10 +1139,33 @@ class FirewallValidator {
         );
       }
 
+      if (firewall.configDir && firewall.configFile) {
+        errors.push(
+          `[Firewall instance ${firewall.name}]: Either configDir or configFile property should be provided but not both in configuration`,
+        );
+      }
+
       // Validate launch template
       if (NetworkConfigTypes.vpcConfig.is(vpc) && firewall.launchTemplate.networkInterfaces) {
-        this.validateLaunchTemplate(vpc, firewall, configDir, securityConfig, helpers, errors);
+        this.validateLaunchTemplate(vpc, firewall, configDir, securityConfig, accountsConfig, helpers, errors);
+        this.validateReplacementConfig(firewall, errors);
       }
+    }
+  }
+
+  /**
+   * Checks if the object structure is correct when static replacements are defined
+   * @param firewall Ec2FirewallInstanceConfig | Ec2FirewallAutoScalingGroupConfig
+   * @param errors string[]
+   */
+  private validateReplacementConfig(
+    firewall: Ec2FirewallInstanceConfig | Ec2FirewallAutoScalingGroupConfig,
+    errors: string[],
+  ) {
+    if (firewall.staticReplacements && !(firewall.configFile || firewall.configDir)) {
+      errors.push(
+        `[Firewall ${firewall.name}]: configFile or configDir property must be set when defining static firewall replacements configuration`,
+      );
     }
   }
 
@@ -1138,6 +1175,7 @@ class FirewallValidator {
     configDir: string,
     networkConfig: NetworkConfig,
     securityConfig: SecurityConfig,
+    accountsConfig: AccountsConfig,
     errors: string[],
   ) {
     for (const group of values.firewalls?.autoscalingGroups ?? []) {
@@ -1164,9 +1202,16 @@ class FirewallValidator {
         }
       }
 
+      if (group.configDir && group.configFile) {
+        errors.push(
+          `[ASG ${group.name}]: Either configDir or configFile property should be provided but not both for ASG`,
+        );
+      }
+
       // Validate launch template
       if (NetworkConfigTypes.vpcConfig.is(vpc)) {
-        this.validateLaunchTemplate(vpc, group, configDir, securityConfig, helpers, errors);
+        this.validateLaunchTemplate(vpc, group, configDir, securityConfig, accountsConfig, helpers, errors);
+        this.validateReplacementConfig(group, errors);
         this.validateAsgTargetGroups(values, group, errors);
       }
     }
@@ -1250,13 +1295,14 @@ class FirewallValidator {
       | t.TypeOf<typeof CustomizationsConfigTypes.ec2FirewallAutoScalingGroupConfig>,
     configDir: string,
     securityConfig: SecurityConfig,
+    accountsConfig: AccountsConfig,
     helpers: CustomizationHelperMethods,
     errors: string[],
   ) {
     // Validate security groups
     this.validateLaunchTemplateSecurityGroups(vpc, firewall, helpers, errors);
     // Validate subnets
-    this.validateLaunchTemplateSubnets(vpc, firewall, helpers, errors);
+    this.validateLaunchTemplateSubnets(vpc, firewall, helpers, accountsConfig, errors);
     // Validate IAM instance profile
     this.validateIamInstanceProfile(vpc, firewall, helpers, errors);
     // Validate block devices
@@ -1356,10 +1402,11 @@ class FirewallValidator {
       | t.TypeOf<typeof CustomizationsConfigTypes.ec2FirewallInstanceConfig>
       | t.TypeOf<typeof CustomizationsConfigTypes.ec2FirewallAutoScalingGroupConfig>,
     helpers: CustomizationHelperMethods,
+    accountsConfig: AccountsConfig,
     errors: string[],
   ) {
     if (CustomizationsConfigTypes.ec2FirewallInstanceConfig.is(firewall)) {
-      this.validateInstanceLaunchTemplateSubnets(vpc, firewall, helpers, errors);
+      this.validateInstanceLaunchTemplateSubnets(vpc, firewall, helpers, accountsConfig, errors);
     }
     if (CustomizationsConfigTypes.ec2FirewallAutoScalingGroupConfig.is(firewall)) {
       this.validateAsgLaunchTemplateSubnets(vpc, firewall, helpers, errors);
@@ -1377,6 +1424,7 @@ class FirewallValidator {
     vpc: VpcConfig,
     firewall: t.TypeOf<typeof CustomizationsConfigTypes.ec2FirewallInstanceConfig>,
     helpers: CustomizationHelperMethods,
+    accountsConfig: AccountsConfig,
     errors: string[],
   ) {
     // Validate a subnet is associated with each network interface
@@ -1389,6 +1437,8 @@ class FirewallValidator {
     const interfaceSubnets = firewall.launchTemplate.networkInterfaces!.map(interfaceItem => {
       return interfaceItem.subnetId!;
     });
+    // Subnet configs
+    const subnets: t.TypeOf<typeof NetworkConfigTypes.subnetConfig>[] = [];
     const subnetsExist = helpers.checkSubnetsInConfig(interfaceSubnets, vpc);
     if (!subnetsExist) {
       errors.push(
@@ -1398,7 +1448,6 @@ class FirewallValidator {
     // Validate subnet AZs
     if (subnetsExist) {
       // Retrieve subnet configs
-      const subnets: t.TypeOf<typeof NetworkConfigTypes.subnetConfig>[] = [];
       interfaceSubnets.forEach(subnet => subnets.push(vpc.subnets!.find(item => item.name === subnet)!));
 
       // Map AZs
@@ -1412,6 +1461,24 @@ class FirewallValidator {
         );
       }
     }
+    const isFirewallLocal = !firewall.account || vpc.account === firewall.account;
+    if (isFirewallLocal) {
+      // No more validations to perform
+      return;
+    }
+    const invalidInterfaceSubnets: string[] = [];
+    subnets.map(
+      subnet =>
+        !CommonValidatorFunctions.getAccountNamesFromTargets(
+          accountsConfig,
+          (subnet.shareTargets ?? {}) as t.ShareTargets,
+        ).includes(firewall.account!) && invalidInterfaceSubnets.push(subnet.name),
+    );
+    invalidInterfaceSubnets.forEach(subnetName =>
+      errors.push(
+        `[Firewall instance ${firewall.name}]: launch template network interface references Subnet ${subnetName} does not share to Account ${firewall.account}`,
+      ),
+    );
   }
 
   /**
@@ -1479,10 +1546,13 @@ class FirewallValidator {
     errors: string[],
   ) {
     //
-    // Validate IAM instance profile exists if configFile or licenseFile are defined
-    if ((firewall.configFile || firewall.licenseFile) && !firewall.launchTemplate.iamInstanceProfile) {
+    // Validate IAM instance profile exists if configFile, configDir or licenseFile are defined
+    if (
+      (firewall.configFile || firewall.licenseFile || firewall.configDir) &&
+      !firewall.launchTemplate.iamInstanceProfile
+    ) {
       errors.push(
-        `[Firewall ${firewall.name}]: IAM instance profile must be defined in the launch template when either configFile or licenseFile properties are defined`,
+        `[Firewall ${firewall.name}]: IAM instance profile must be defined in the launch template when either configFile, licenseFile or configDir properties are defined`,
       );
     }
     //

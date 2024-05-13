@@ -20,6 +20,10 @@ export enum AcceleratorStage {
    * Prepare Stage - Verify the configuration files, environment and create accounts
    */
   PREPARE = 'prepare',
+  /**
+   * DiagnosticsPack Stage - Creates Diagnostics pack resources
+   */
+  DIAGNOSTICS_PACK = 'diagnostics-pack',
   ORGANIZATIONS = 'organizations',
   KEY = 'key',
   LOGGING = 'logging',
@@ -40,6 +44,7 @@ export enum AcceleratorStage {
   NETWORK_ASSOCIATIONS = 'network-associations',
   NETWORK_ASSOCIATIONS_GWLB = 'network-associations-gwlb',
   SECURITY_AUDIT = 'security-audit',
+  RESOURCE_POLICY_ENFORCEMENT = 'resource-policy-enforcement',
   FINALIZE = 'finalize',
   IMPORT_ASEA_RESOURCES = 'import-asea-resources',
   POST_IMPORT_ASEA_RESOURCES = 'post-import-asea-resources',

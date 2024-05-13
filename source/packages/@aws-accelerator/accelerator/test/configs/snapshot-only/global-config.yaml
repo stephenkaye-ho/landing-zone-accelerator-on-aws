@@ -18,6 +18,17 @@ snsTopics:
       emailAddresses:
         - <notify-security>@example.com <----- UPDATE EMAIL ADDRESS
 terminationProtection: true
+lambda:
+  encryption:
+    useCMK: true
+    deploymentTargets:
+      accounts:
+        - Management
+        - Network
+      organizationalUnits:
+        - Security
+      excludedRegions:
+        - us-west-2
 controlTower:
   enable: true
   controls:
@@ -46,6 +57,16 @@ cdkOptions:
   useManagementAccessRole: true
   customDeploymentRole: AWSA-Deployment
   forceBootstrap: true
+s3:
+  encryption:
+    createCMK: true
+    deploymentTargets:
+      accounts:
+        - Management
+      organizationalUnits:
+        - Security
+      excludedRegions:
+        - us-west-2
 logging:
   account: LogArchive
   centralizedLoggingRegion: us-west-2
@@ -101,7 +122,15 @@ logging:
             transitionAfter: 365
         prefix: 'macie'
   accessLogBucket:
-    importedBucket: 
+    enable: true
+    deploymentTargets:
+      accounts:
+        - Management
+      organizationalUnits:
+        - Security
+      excludedRegions:
+        - us-west-2
+    importedBucket:
       name: existing-access-logs-bucket-${ACCOUNT_ID}-${REGION}
     customPolicyOverrides:
       policy: bucket-policies/full-access-log-bucket.json
@@ -109,7 +138,7 @@ logging:
     #   - policy: bucket-policies/access-logs-bucket.json
     lifecycleRules: []
   elbLogBucket:
-    importedBucket: 
+    importedBucket:
       name: existing-elb-logs-bucket-${ACCOUNT_ID}-${REGION}
       applyAcceleratorManagedBucketPolicy: true
     # customPolicyOverrides:
@@ -141,6 +170,15 @@ logging:
     sendToCloudWatchLogs: false
     sendToS3: true
   cloudwatchLogs:
+    encryption:
+      useCMK: true
+      deploymentTargets:
+        accounts:
+          - Management
+        organizationalUnits:
+          - Security
+        excludedRegions:
+          - us-west-2
     enable: true
     replaceLogDestinationArn: arn:aws:logs:us-east-1:111111111111:destination/log-destination
     dynamicPartitioning: dynamic-partitioning/log-filters.json
@@ -161,8 +199,14 @@ logging:
 tags:
   - key: Environment
     value: Dev
-  - key: ResourceOwner
-    value: AcmeApp
+  - key: ReplacementOne
+    value: "{{UNDEFINED_PLACEHOLDER}}"
+  - key: ReplacementTwo
+    value: "{{DEFINED_PLACEHOLDER}}"
+  - key: MgmtAccount
+    value: "{{account Management}}"
+  - key: DynamicLookup
+    value: "{{resolve:ssm:/accelerator/lza-prefix}}"
 limits:
   - serviceCode: lambda
     quotaCode: L-B99A9384
@@ -176,7 +220,7 @@ limits:
     quotaCode: L-4019AD8B
     desiredValue: 15
     deploymentTargets:
-      accounts: 
+      accounts:
         - Management
 reports:
   costAndUsageReport:
@@ -219,25 +263,29 @@ reports:
           threshold: 90
           comparisonOperator: GREATER_THAN
           subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          recipients:
+            - myemail+pa-budg@example.com
         - type: ACTUAL
           thresholdType: PERCENTAGE
           threshold: 80
           comparisonOperator: GREATER_THAN
-          subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          subscriptionType: SNS
+          address: arn:aws:sns:us-east-1:111111111111:sample-budget
         - type: ACTUAL
           thresholdType: PERCENTAGE
           threshold: 75
           comparisonOperator: GREATER_THAN
-          subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          subscriptionType: SNS
+          recipients:
+            - arn:aws:sns:us-east-1:111111111111:sample-budget
         - type: ACTUAL
           thresholdType: PERCENTAGE
           threshold: 50
           comparisonOperator: GREATER_THAN
           subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          recipients:
+            - myemail+pa-budg@example.com
+            - myemail+pa1-budg@example.com
 backup:
   vaults:
     - name: BackupVault
@@ -262,3 +310,9 @@ ssmParameters:
       - name: someOtherName
         path: /my/account/structure
         value: someOtherValue
+
+ssmInventory:
+  enable: true
+  deploymentTargets:
+    organizationalUnits:
+      - Root

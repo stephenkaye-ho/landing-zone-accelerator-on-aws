@@ -1,5 +1,5 @@
 /**
- *  Copyright 2022 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *  Copyright 2024 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance
  *  with the License. A copy of the License is located at
@@ -24,6 +24,7 @@ import { createLogger, throttlingBackOff } from '@aws-accelerator/utils';
 import * as t from './common-types';
 import { AccountsConfig } from './accounts-config';
 import { ReplacementsConfig } from './replacements-config';
+import { OrganizationConfig } from './organization-config';
 
 const logger = createLogger(['global-config']);
 /**
@@ -39,6 +40,20 @@ export abstract class GlobalConfigTypes {
   static readonly controlTowerConfig = t.interface({
     enable: t.boolean,
     controls: t.optional(t.array(this.controlTowerControlConfig)),
+  });
+
+  static readonly s3EncryptionConfig = t.type({
+    createCMK: t.boolean,
+    deploymentTargets: t.optional(t.deploymentTargets),
+  });
+
+  static readonly s3GlobalConfig = t.type({
+    encryption: t.optional(this.s3EncryptionConfig),
+  });
+
+  static readonly serviceEncryptionConfig = t.type({
+    useCMK: t.boolean,
+    deploymentTargets: t.optional(t.deploymentTargets),
   });
 
   static readonly cloudTrailSettingsConfig = t.interface({
@@ -76,6 +91,7 @@ export abstract class GlobalConfigTypes {
     useManagementAccessRole: t.optional(t.boolean),
     customDeploymentRole: t.optional(t.string),
     forceBootstrap: t.optional(t.boolean),
+    skipStaticValidation: t.optional(t.boolean),
   });
 
   static readonly externalLandingZoneResourcesConfig = t.interface({
@@ -94,7 +110,16 @@ export abstract class GlobalConfigTypes {
     attachPolicyToIamRoles: t.optional(t.array(t.string)),
   });
 
+  static readonly assetBucketConfig = t.interface({
+    s3ResourcePolicyAttachments: t.optional(t.array(t.resourcePolicyStatement)),
+    kmsResourcePolicyAttachments: t.optional(t.array(t.resourcePolicyStatement)),
+    importedBucket: t.optional(t.importedCustomerManagedEncryptionKeyBucketConfig),
+    customPolicyOverrides: t.optional(t.customS3ResourceAndKmsPolicyOverridesConfig),
+  });
+
   static readonly accessLogBucketConfig = t.interface({
+    enable: t.optional(t.boolean),
+    deploymentTargets: t.optional(t.deploymentTargets),
     lifecycleRules: t.optional(t.array(t.lifecycleRuleConfig)),
     s3ResourcePolicyAttachments: t.optional(t.array(t.resourcePolicyStatement)),
     importedBucket: t.optional(t.importedS3ManagedEncryptionKeyBucketConfig),
@@ -127,6 +152,7 @@ export abstract class GlobalConfigTypes {
   static readonly cloudwatchLogsConfig = t.interface({
     dynamicPartitioning: t.optional(t.nonEmptyString),
     enable: t.optional(t.boolean),
+    encryption: t.optional(this.serviceEncryptionConfig),
     exclusions: t.optional(t.array(GlobalConfigTypes.cloudWatchLogsExclusionConfig)),
     replaceLogDestinationArn: t.optional(t.nonEmptyString),
   });
@@ -137,6 +163,7 @@ export abstract class GlobalConfigTypes {
     cloudtrail: GlobalConfigTypes.cloudTrailConfig,
     sessionManager: GlobalConfigTypes.sessionManagerConfig,
     accessLogBucket: t.optional(GlobalConfigTypes.accessLogBucketConfig),
+    assetBucket: t.optional(GlobalConfigTypes.assetBucketConfig),
     centralLogBucket: t.optional(GlobalConfigTypes.centralLogBucketConfig),
     elbLogBucket: t.optional(GlobalConfigTypes.elbLogBucketConfig),
     cloudwatchLogs: t.optional(GlobalConfigTypes.cloudwatchLogsConfig),
@@ -163,6 +190,7 @@ export abstract class GlobalConfigTypes {
     comparisonOperator: t.enums('ComparisonType', ['GREATER_THAN', 'LESS_THAN', 'EQUAL_TO']),
     threshold: t.optional(t.number),
     address: t.optional(t.nonEmptyString),
+    recipients: t.optional(t.array(t.nonEmptyString)),
     subscriptionType: t.enums('SubscriptionType', ['EMAIL', 'SNS']),
   });
 
@@ -252,6 +280,10 @@ export abstract class GlobalConfigTypes {
     maxConcurrentStacks: t.optional(t.number),
   });
 
+  static readonly lambdaConfig = t.type({
+    encryption: t.optional(this.serviceEncryptionConfig),
+  });
+
   static readonly globalConfig = t.interface({
     homeRegion: t.nonEmptyString,
     enabledRegions: t.array(t.region),
@@ -272,6 +304,8 @@ export abstract class GlobalConfigTypes {
     limits: t.optional(t.array(this.serviceQuotaLimitsConfig)),
     acceleratorMetadata: t.optional(GlobalConfigTypes.acceleratorMetadataConfig),
     acceleratorSettings: t.optional(GlobalConfigTypes.acceleratorSettingsConfig),
+    lambda: t.optional(GlobalConfigTypes.lambdaConfig),
+    s3: t.optional(this.s3GlobalConfig),
   });
 }
 
@@ -351,6 +385,131 @@ export abstract class ControlTowerControlConfig
  *   importExternalLandingZoneResources: true
  * ```
  */
+
+/**
+ * *{@link GlobalConfig} / {@link ServiceEncryptionConfig}*
+ *
+ * AWS service encryption configuration settings
+ *
+ * @example
+ * ```
+ *  encryption:
+ *    useCMK: true
+ *    deploymentTargets:
+ *      organizationalUnits:
+ *        - Root
+ * ```
+ */
+export class ServiceEncryptionConfig implements t.TypeOf<typeof GlobalConfigTypes.serviceEncryptionConfig> {
+  /**
+   * Flag indicates whether Accelerator deployed AWS Service will use AWS KMS CMK for encryption or Service managed KMS.
+   *
+   * @remarks
+   * When set to `true`, the solution will create AWS KMS CMK which will be used by the service for encryption. Example, when flag set to `true` for AWS Lambda service, the solution will create AWS KMS CMK to encrypt lambda function environment variables, otherwise AWS managed key will be used for environment variables encryption.
+   *
+   * @default false
+   */
+  readonly useCMK: boolean = false;
+  /**
+   * To control target environments (AWS Account and Region) for the given `useCMK` setting, you may optionally specify deployment targets.
+   * Leaving `deploymentTargets` undefined will apply `useCMK` setting to all accounts and enabled regions.
+   */
+  readonly deploymentTargets: t.DeploymentTargets | undefined = undefined;
+}
+
+/**
+ * *{@link GlobalConfig} / {@link S3GlobalConfig} / {@link S3EncryptionConfig}*
+ *
+ * AWS S3 encryption configuration settings
+ *
+ * @example
+ * ```
+ *  encryption:
+ *    createCMK: true
+ *    deploymentTargets:
+ *      organizationalUnits:
+ *        - Root
+ * ```
+ */
+export class S3EncryptionConfig implements t.TypeOf<typeof GlobalConfigTypes.s3EncryptionConfig> {
+  /**
+   * Flag indicates whether solution will create CMK for S3 bucket encryption.
+   *
+   * @remarks
+   * When set to `true`, the solution will create AWS KMS CMK which will be used by the S3 for server-side encryption.
+   *
+   * @default true
+   */
+  readonly createCMK: boolean = true;
+  /**
+   * To control target environments (AWS Account and Region) for the given `createCMK` setting, you may optionally specify deployment targets.
+   * Leaving `deploymentTargets` undefined will apply `createCMK` setting to all accounts and enabled regions.
+   */
+  readonly deploymentTargets: t.DeploymentTargets | undefined = undefined;
+}
+
+/**
+ * *{@link GlobalConfig} / {@link S3GlobalConfig}*
+ *
+ * AWS S3 global encryption configuration settings
+ *
+ * @example
+ * ```
+ *  encryption:
+ *    createCMK: true
+ *    deploymentTargets:
+ *      organizationalUnits:
+ *        - Root
+ * ```
+ */
+export class S3GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.s3GlobalConfig> {
+  /**
+   * S3 encryption configuration.
+   *
+   * @remarks
+   * Please use the following configuration to disable AWS KMS CMK for AWS S3 bucket encryption.
+   * In the absence of this property, the solution will deploy the AWS KMS CMK in every environment (AWS Account and Region).
+   * The solution will disregard this property and create CMKs to encrypt the installer bucket, pipeline bucket, and solution deployed CentralLogs bucket,
+   * because AWS KMS CMK is always used to encrypt installer buckets, pipeline buckets, and solution deployed CentralLogs buckets.
+   *
+   * @example
+   * ```
+   * s3:
+   *   encryption:
+   *     createCMK: false
+   *     deploymentTargets:
+   *       organizationalUnits:
+   *         - Root
+   * ```
+   * @default undefined
+   */
+  readonly encryption: S3EncryptionConfig | undefined = undefined;
+}
+
+/**
+ * *{@link GlobalConfig} / {@link lambdaConfig}*
+ *
+ * Lambda Function configuration settings
+ *
+ * @example
+ * ```
+ *   encryption:
+ *    useCMK: true
+ *    deploymentTargets:
+ *      organizationalUnits:
+ *        - Root
+ * ```
+ */
+export class LambdaConfig implements t.TypeOf<typeof GlobalConfigTypes.lambdaConfig> {
+  /**
+   * Encryption setting for AWS Lambda environment variables.
+   *
+   * @remarks
+   *  For more information please refer {@link ServiceEncryptionConfig}
+   */
+  readonly encryption: ServiceEncryptionConfig | undefined = undefined;
+}
+
 export class externalLandingZoneResourcesConfig
   implements t.TypeOf<typeof GlobalConfigTypes.externalLandingZoneResourcesConfig>
 {
@@ -440,11 +599,14 @@ export class cdkOptionsConfig implements t.TypeOf<typeof GlobalConfigTypes.cdkOp
    * Creates a deployment role in all accounts in the home region with the name specified in the parameter. This role is used by the LZA for all CDK deployment tasks.
    */
   readonly customDeploymentRole = undefined;
-
   /**
    * Forces the Accelerator to deploy the bootstrapping stack and circumvent the ssm parameter check. This option is needed when adding or removing a custom deployment role
    */
   readonly forceBootstrap = undefined;
+  /**
+   * Determines if the LZA pipeline will skip the static config validation step during the pipeline's Build phase. This can be helpful in cases where the config-validator incorrectly throws errors for a valid configuration.
+   */
+  readonly skipStaticValidation = undefined;
 }
 /**
  * *{@link GlobalConfig} / {@link LoggingConfig} / {@link CloudTrailConfig} / ({@link AccountCloudTrailConfig}) / {@link CloudTrailSettingsConfig}*
@@ -665,11 +827,11 @@ export class SessionManagerConfig implements t.TypeOf<typeof GlobalConfigTypes.s
   /**
    * List of AWS Region names to be excluded from configuring SessionManager configuration
    */
-  readonly excludeRegions = [];
+  readonly excludeRegions: t.Region[] = [];
   /**
    * List of AWS Account names to be excluded from configuring SessionManager configuration
    */
-  readonly excludeAccounts = [];
+  readonly excludeAccounts: string[] = [];
   /**
    * S3 Lifecycle rule for log storage
    */
@@ -689,6 +851,10 @@ export class SessionManagerConfig implements t.TypeOf<typeof GlobalConfigTypes.s
  * @example
  * ```
  * accessLogBucket:
+ *   enable: true
+ *   deploymentTargets:
+ *     organizationalUnits:
+ *       - Root
  *   s3ResourcePolicyAttachments:
  *     - policy: s3-policies/policy1.json
  *   lifecycleRules:
@@ -728,11 +894,28 @@ export class AccessLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.
    */
   readonly lifecycleRules: t.LifeCycleRule[] | undefined = undefined;
   /**
+   * Flag indicating S3 access logging bucket is enable by solution.
+   *
+   * @remarks
+   * When this property is undefined solution will create S3 access log bucket. You can use `deploymentTargets` to control target accounts and regions for the given `accessLogBucket` configuration.
+   * In the solution, this property will be ignored and S3 Access log buckets will be created for the installer bucket,
+   * pipeline bucket, solution deployed CentralLogs bucket, and solution deployed Assets bucket, since these buckets always have server access logging enabled.
+   */
+  readonly enable: boolean | undefined = undefined;
+  /**
+   * To control target environments (AWS Account and Region) for the given `accessLogBucket` setting, you may optionally specify deployment targets.
+   * Leaving `deploymentTargets` undefined will apply `useCMK` setting to all accounts and enabled regions.
+   */
+  readonly deploymentTargets: t.DeploymentTargets | undefined = undefined;
+  /**
    * JSON policy files.
    *
    * @remarks
    * Policy statements from these files will be added to the bucket resource policy.
    * This property can not be used when customPolicyOverrides.s3Policy property has value.
+   *
+   * Note: When Block Public Access is enabled for S3 on the AWS account, you can't specify a policy that would make
+   * the S3 Bucket public.
    */
   readonly s3ResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
   /**
@@ -829,6 +1012,9 @@ export class CentralLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes
    * @remarks
    * Policy statements from these files will be added to the bucket resource policy.
    * This property can not be used when customPolicyOverrides.s3Policy property has value.
+   *
+   * Note: When Block Public Access is enabled for S3 on the AWS account, you can't specify a policy that would make
+   * the S3 Bucket public.
    */
   readonly s3ResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
   /**
@@ -881,7 +1067,80 @@ export class CentralLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes
    */
   readonly customPolicyOverrides: t.CustomS3ResourceAndKmsPolicyOverridesConfig | undefined = undefined;
 }
-
+/**
+ * *{@link GlobalConfig} / {@link LoggingConfig} / {@link AssetBucketConfig}*
+ *
+ * Accelerator global S3 asset bucket configuration
+ *
+ * @example
+ * ```
+ * assetBucket:
+ *   s3ResourcePolicyAttachments:
+ *     - policy: s3-policies/policy1.json
+ *   importedBucket:
+ *     name: aws-accelerator-assets
+ *     applyAcceleratorManagedBucketPolicy: true
+ * ```
+ */
+export class AssetBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.assetBucketConfig> {
+  /**
+   * JSON policy files.
+   *
+   * @remarks
+   * Policy statements from these files will be added to the bucket resource policy.
+   * This property can not be used when customPolicyOverrides.s3Policy property has value.
+   *
+   * Note: When Block Public Access is enabled for S3 on the AWS account, you can't specify a policy that would make
+   * the S3 Bucket public.
+   */
+  readonly s3ResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
+  /**
+   * JSON policy files.
+   *
+   * @remarks
+   * Policy statements from these files will be added to the bucket encryption key policy.
+   * This property can not be used when customPolicyOverrides.kmsPolicy property has value.
+   * When imported CentralLogs bucket used with createAcceleratorManagedKey set to false, this property can not have any value.
+   */
+  readonly kmsResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
+  /**
+   * Imported bucket configuration.
+   *
+   * @remarks
+   * Use this configuration when accelerator will import existing Assets bucket.
+   *
+   * Use the following configuration to imported Assets bucket, manage bucket resource policy and apply bucket encryption through the solution.
+   * ```
+   * importedBucket:
+   *    name: aws-assets
+   *    applyAcceleratorManagedBucketPolicy: true
+   *    createAcceleratorManagedKey: true
+   * ```
+   *
+   * @default
+   * undefined
+   */
+  readonly importedBucket: t.ImportedCustomerManagedEncryptionKeyBucketConfig | undefined = undefined;
+  /**
+   * Custom policy overrides configuration.
+   *
+   * @remarks
+   * Use this configuration to provide JSON string policy file for bucket resource policy.
+   * Bucket resource policy will be over written by content of this file, so when using these option policy files must contain complete policy document.
+   * When customPolicyOverrides.s3Policy defined importedBucket.applyAcceleratorManagedBucketPolicy can not be set to true also s3ResourcePolicyAttachments property can not be defined.
+   *
+   * Use the following configuration to apply custom bucket resource policy overrides through policy JSON file.
+   * ```
+   * customPolicyOverrides:
+   *   s3Policy: path/to/policy.json
+   *   kmsPolicy: kms/full-central-logs-bucket-key-policy.json
+   * ```
+   *
+   * @default
+   * undefined
+   */
+  readonly customPolicyOverrides: t.CustomS3ResourceAndKmsPolicyOverridesConfig | undefined = undefined;
+}
 /**
  * *{@link GlobalConfig} / {@link LoggingConfig} / {@link ElbLogBucketConfig}*
  *
@@ -936,6 +1195,9 @@ export class ElbLogBucketConfig implements t.TypeOf<typeof GlobalConfigTypes.elb
    * @remarks
    * Policy statements from these files will be added to the bucket resource policy.
    * This property can not be used when customPolicyOverrides.s3Policy property has value.
+   *
+   * Note: When Block Public Access is enabled for S3 on the AWS account, you can't specify a policy that would make
+   * the S3 Bucket public.
    */
   readonly s3ResourcePolicyAttachments: t.ResourcePolicyStatement[] | undefined = undefined;
   /**
@@ -1031,6 +1293,11 @@ export class CloudWatchLogsExclusionConfig implements t.TypeOf<typeof GlobalConf
  *
  * Accelerator global CloudWatch Logs logging configuration
  *
+ * @remarks
+ * You can decide to use AWS KMS CMK or server-side encryption for the log data at rest. When this `encryption` property is undefined, the solution will deploy AWS KMS CMK to encrypt AWS CloudWatch log data at rest.
+ * You can use `deploymentTargets` to control target accounts and regions for the given `useCMK` configuration.
+ * please see [here](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/data-protection.html) or [here](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/encrypt-log-data-kms.html) for more information.
+ *
  * @example
  * ```
  * cloudwatchLogs:
@@ -1038,6 +1305,11 @@ export class CloudWatchLogsExclusionConfig implements t.TypeOf<typeof GlobalConf
  *   # default is true, if undefined this is set to true
  *   # if set to false, no replication is performed which is useful in test or temporary environments
  *   enable: true
+ *   encryption:
+ *     useCMK: true
+ *     deploymentTargets:
+ *       organizationalUnits:
+ *         - Root
  *   replaceLogDestinationArn: arn:aws:logs:us-east-1:111111111111:destination:ReplaceDestination
  *   exclusions:
  *    # in these OUs do not do log replication
@@ -1099,6 +1371,13 @@ export class CloudWatchLogsConfig implements t.TypeOf<typeof GlobalConfigTypes.c
    */
   readonly enable: boolean | undefined = undefined;
   /**
+   * Encryption setting for AWS CloudWatch log group data.
+   *
+   * @remarks
+   *  For more information please refer {@link ServiceEncryptionConfig}
+   */
+  readonly encryption: ServiceEncryptionConfig | undefined = undefined;
+  /**
    * Exclude Log Groups during replication
    */
   readonly exclusions: CloudWatchLogsExclusionConfig[] | undefined = undefined;
@@ -1156,6 +1435,10 @@ export class LoggingConfig implements t.TypeOf<typeof GlobalConfigTypes.loggingC
    * SessionManager logging configuration
    */
   readonly sessionManager: SessionManagerConfig = new SessionManagerConfig();
+  /**
+   * Declaration of a (S3 Bucket) configuration.
+   */
+  readonly assetBucket: AssetBucketConfig | undefined = undefined;
   /**
    * Declaration of a (S3 Bucket) Lifecycle rule configuration.
    */
@@ -1290,7 +1573,9 @@ export class CostAndUsageReportConfig implements t.TypeOf<typeof GlobalConfigTyp
  *         threshold: 90
  *         comparisonOperator: GREATER_THAN
  *         subscriptionType: EMAIL
- *         address: myemail+pa-budg@example.com
+ *         recipients:
+ *          - myemail+pa1-budg@example.com
+ *          - myemail+pa2-budg@example.com
  * ```
  */
 export class BudgetReportConfig implements t.TypeOf<typeof GlobalConfigTypes.budgetConfig> {
@@ -1397,20 +1682,67 @@ export class BudgetReportConfig implements t.TypeOf<typeof GlobalConfigTypes.bud
   /**
    * The comparison that's used for the notification that's associated with a budget.
    */
-  readonly notifications = [
-    {
-      type: '',
-      thresholdType: '',
-      comparisonOperator: '',
-      threshold: 90,
-      address: '',
-      subscriptionType: '',
-    },
-  ];
+  readonly notifications: NotificationConfig[] | undefined = [new NotificationConfig()];
   /**
    * List of OU's and accounts to be configured for Budgets configuration
    */
   readonly deploymentTargets: t.DeploymentTargets = new t.DeploymentTargets();
+}
+
+/**
+ * *{@link GlobalConfig} / {@link ReportConfig} / {@link BudgetReportConfig} / {@link NotificationConfig}*
+ *
+ * Notification configuration
+ *
+ * @example
+ * ```
+ * notifications:
+ *  - type: ACTUAL
+ *    thresholdType: PERCENTAGE
+ *    threshold: 90
+ *    comparisonOperator: GREATER_THAN
+ *    subscriptionType: EMAIL
+ *    recipients:
+ *     - myemail+pa1-budg@example.com
+ *     - myemail+pa2-budg@example.com
+ * ```
+ */
+export class NotificationConfig implements t.TypeOf<typeof GlobalConfigTypes.notificationConfig> {
+  /**
+   * The comparison that's used for the notification that's associated with a budget.
+   */
+  readonly type: 'ACTUAL' | 'FORECASTED' = 'ACTUAL';
+  /**
+   * The type of threshold for a notification.For ABSOLUTE_VALUE thresholds,
+   * AWS notifies you when you go over or are forecasted to go over your total cost threshold.
+   * For PERCENTAGE thresholds, AWS notifies you when you go over or are forecasted to go over a certain percentage of your forecasted spend.
+   * For example,if you have a budget for 200 dollars and you have a PERCENTAGE threshold of 80%, AWS notifies you when you go over 160 dollars.
+   */
+  readonly thresholdType: 'PERCENTAGE' | 'ABSOLUTE_VALUE' = 'PERCENTAGE';
+  /**
+   * The type of threshold associate with a notification.
+   */
+  readonly threshold: number = 90;
+  /**
+   * The comparison that's used for this notification.
+   */
+  readonly comparisonOperator: 'GREATER_THAN' | 'LESS_THAN' | 'EQUAL_TO' = 'GREATER_THAN';
+  /**
+   * The type of notification that AWS sends to a subscriber.
+   */
+  readonly subscriptionType: 'EMAIL' | 'SNS' = 'EMAIL';
+  /**
+   * The address that AWS sends budget notifications to, either an SNS topic or an email.
+   *
+   * @deprecated
+   * This is a temporary property and it has been deprecated.
+   * Please use recipients property to specify address for budget notifications.
+   */
+  readonly address: string | undefined = '';
+  /**
+   * The recipients list that AWS sends budget notifications to, either an SNS topic or an email.
+   */
+  readonly recipients: string[] | undefined = [];
 }
 
 /**
@@ -2055,7 +2387,7 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
    *   - key: ResourceOwner
    *     value: AcmeApp
    *   - key: CostCenter
-   *     value: 123
+   *     value: '123'
    * ```
    **/
   readonly tags: t.Tag[] = [];
@@ -2092,6 +2424,48 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
    */
 
   iamRoleSsmParameters: { account: string; region: string; parametersByPath: { [key: string]: string } }[] = [];
+
+  /**
+   * AWS Lambda Function environment variables encryption configuration options.
+   *
+   * @remarks
+   * You can decide to use AWS KMS CMK or AWS managed key for Lambda function environment variables encryption. When this property is undefined, the solution will deploy AWS KMS CMK to encrypt function environment variables.
+   * You can use `deploymentTargets` to control target accounts and regions for the given `useCMK` configuration.
+   *
+   *  For more information please see [here](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html#configuration-envvars-encryption)
+   *
+   * @example
+   * ```
+   * lambda:
+   *   encryption:
+   *    useCMK: true
+   *    deploymentTargets:
+   *      organizationalUnits:
+   *        - Root
+   * ```
+   */
+  readonly lambda: LambdaConfig | undefined = undefined;
+
+  /**
+   * AWS S3 global configuration options.
+   *
+   * @remarks
+   * You can decide to create AWS KMS CMK for AWS S3 server side encryption.  When this property is undefined, the solution will deploy AWS KMS CMK to encrypt AWS S3 bucket.
+   * You can use `deploymentTargets` to control target accounts and regions for the given `createCMK` configuration.
+   * This configuration is not applicable to LogArchive's central logging region, because the solution deployed CentralLogs bucket always encrypted with AWS KMS CMK.
+   *
+   *  For more information please see [here](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingEncryption.html)
+   *
+   * @example
+   * ```
+   * s3:
+   *   createCMK: true
+   *   deploymentTargets:
+   *     organizationalUnits:
+   *       - Root
+   * ```
+   */
+  readonly s3: S3GlobalConfig | undefined = undefined;
 
   /**
    *
@@ -2157,6 +2531,7 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
    */
   static loadRawGlobalConfig(dir: string): GlobalConfig {
     const accountsConfig = AccountsConfig.load(dir);
+    const orgConfig = OrganizationConfig.load(dir);
     let replacementsConfig: ReplacementsConfig;
 
     if (fs.existsSync(path.join(dir, ReplacementsConfig.FILENAME))) {
@@ -2165,7 +2540,7 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
       replacementsConfig = new ReplacementsConfig();
     }
 
-    replacementsConfig.loadReplacementValues({});
+    replacementsConfig.loadReplacementValues({}, orgConfig.enable);
     return GlobalConfig.load(dir, replacementsConfig);
   }
 
@@ -2253,10 +2628,14 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
     prefix: string,
     accounts: string[],
     managementAccountId: string,
+    isOrgEnabled: boolean,
   ) {
     const ssmPath = `${prefix}/iam/role/`;
     const promises = [];
     const ssmParameters = [];
+    if (isOrgEnabled) {
+      return;
+    }
     for (const account of accounts) {
       promises.push(this.loadIAMRoleSSMParametersByEnv(ssmPath, account, region, partition, managementAccountId));
       if (promises.length > 800) {
@@ -2339,6 +2718,7 @@ export class GlobalConfig implements t.TypeOf<typeof GlobalConfigTypes.globalCon
         this.getParametersByPath(getSsmPath(t.AseaResourceTypePaths.VPC), ssmClient),
         this.getParametersByPath(getSsmPath(t.AseaResourceTypePaths.TRANSIT_GATEWAY), ssmClient),
         this.getParametersByPath(getSsmPath(t.AseaResourceTypePaths.VPC_PEERING), ssmClient),
+        this.getParametersByPath(getSsmPath(t.AseaResourceTypePaths.NETWORK_FIREWALL), ssmClient),
       ];
       const ssmResults = await Promise.all(ssmPromises);
       this.externalLandingZoneResources.resourceParameters[`${accountId}-${region}`] = ssmResults.reduce(

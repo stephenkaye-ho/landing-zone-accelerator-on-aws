@@ -2,6 +2,33 @@ homeRegion: &HOME_REGION us-east-1
 enabledRegions:
   - *HOME_REGION
   - us-west-2
+  # - ap-south-1
+  # - eu-central-1
+  # - us-west-1
+  # - eu-north-1
+  # - eu-west-3
+  # - eu-west-2
+  # - eu-west-1
+  # - ap-northeast-3
+  # - ap-northeast-2
+  # - ap-northeast-1
+  # - sa-east-1
+  # - ap-southeast-1
+  # - ap-southeast-2
+  # - us-east-2
+  # - ca-central-1
+  # Opt-in regions commented now, once test pipeline account configured for opt-in regions will use those
+  # - ap-south-2
+  # - eu-south-1
+  # - eu-south-2
+  # - me-central-1
+  # - il-central-1
+  # - eu-central-2
+  # - af-south-1
+  # - me-south-1
+  # - ap-east-1
+  # - ap-southeast-3
+
 managementAccountAccessRole: AWSControlTowerExecution
 cloudwatchLogRetentionInDays: 3653
 acceleratorMetadata:
@@ -18,6 +45,17 @@ snsTopics:
       emailAddresses:
         - <notify-security>@example.com <----- UPDATE EMAIL ADDRESS
 terminationProtection: true
+lambda:
+  encryption:
+    useCMK: true
+    deploymentTargets:
+      accounts:
+        - Management
+        - Network
+      organizationalUnits:
+        - Security
+      excludedRegions:
+        - us-west-2
 controlTower:
   enable: true
   controls:
@@ -44,6 +82,16 @@ controlTower:
 cdkOptions:
   centralizeBuckets: true
   useManagementAccessRole: true
+s3:
+  encryption:
+    createCMK: true
+    deploymentTargets:
+      accounts:
+        - Management
+      organizationalUnits:
+        - Security
+      excludedRegions:
+        - us-west-2
 logging:
   account: LogArchive
   centralizedLoggingRegion: us-west-2
@@ -106,9 +154,27 @@ logging:
           - storageClass: GLACIER
             transitionAfter: 365
         prefix: 'macie'
+    s3ResourcePolicyAttachments:
+      - policy: bucket-policies/central-log-bucket.json
+
+  assetBucket:
+    importedBucket:
+      name: aws-accelerator-imported-all-enabled
+      applyAcceleratorManagedBucketPolicy: true
+      createAcceleratorManagedKey: true
+    s3ResourcePolicyAttachments:
+      - policy: bucket-policies/assets-bucket.json
 
   accessLogBucket:
-    importedBucket: 
+    enable: true
+    deploymentTargets:
+      accounts:
+        - Management
+      organizationalUnits:
+        - Security
+      excludedRegions:
+        - us-west-2
+    importedBucket:
       name: existing-access-logs-bucket-${ACCOUNT_ID}-${REGION}
     customPolicyOverrides:
       policy: bucket-policies/full-access-log-bucket.json
@@ -116,7 +182,7 @@ logging:
     #   - policy: bucket-policies/access-logs-bucket.json
     lifecycleRules: []
   elbLogBucket:
-    importedBucket: 
+    importedBucket:
       name: existing-elb-logs-bucket-${ACCOUNT_ID}-${REGION}
       applyAcceleratorManagedBucketPolicy: true
     # customPolicyOverrides:
@@ -129,10 +195,19 @@ logging:
     sendToCloudWatchLogs: false
     sendToS3: true
   cloudwatchLogs:
+    encryption:
+      useCMK: true
+      deploymentTargets:
+        accounts:
+          - Management
+        organizationalUnits:
+          - Security
+        excludedRegions:
+          - us-west-2
     enable: true
     dynamicPartitioning: dynamic-partitioning/log-filters.json
-    replaceLogDestinationArn: replaceLogDestinationArn  
-    
+    replaceLogDestinationArn: replaceLogDestinationArn
+
     exclusions:
       - organizationalUnits:
           - Infrastructure
@@ -165,7 +240,7 @@ limits:
     quotaCode: L-4019AD8B
     desiredValue: 15
     deploymentTargets:
-      accounts: 
+      accounts:
         - SharedServices
 reports:
   costAndUsageReport:
@@ -208,25 +283,29 @@ reports:
           threshold: 90
           comparisonOperator: GREATER_THAN
           subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          recipients:
+            - myemail+pa-budg@example.com
         - type: ACTUAL
           thresholdType: PERCENTAGE
           threshold: 80
           comparisonOperator: GREATER_THAN
-          subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          subscriptionType: SNS
+          address: arn:aws:sns:us-east-1:111111111111:aws-accelerator-Security
         - type: ACTUAL
           thresholdType: PERCENTAGE
           threshold: 75
           comparisonOperator: GREATER_THAN
-          subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          subscriptionType: SNS
+          recipients:
+            - arn:aws:sns:us-east-1:111111111111:aws-accelerator-Security
         - type: ACTUAL
           thresholdType: PERCENTAGE
           threshold: 50
           comparisonOperator: GREATER_THAN
           subscriptionType: EMAIL
-          address: myemail+pa-budg@example.com
+          recipients:
+            - myemail+pa-budg@example.com
+            - myemail+pa1-budg@example.com
 backup:
   vaults:
     - name: BackupVault
@@ -251,3 +330,9 @@ ssmParameters:
       - name: someOtherName
         path: /my/account/structure
         value: someOtherValue
+
+ssmInventory:
+  enable: true
+  deploymentTargets:
+    organizationalUnits:
+      - Root

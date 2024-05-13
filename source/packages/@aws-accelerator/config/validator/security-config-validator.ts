@@ -18,8 +18,18 @@ import { AccountsConfig } from '../lib/accounts-config';
 import * as t from '../lib/common-types';
 import { GlobalConfig } from '../lib/global-config';
 import { OrganizationConfig } from '../lib/organization-config';
-import { AwsConfigRuleSet, SecurityConfig, SecurityConfigTypes } from '../lib/security-config';
+import { ReplacementsConfig } from '../lib/replacements-config';
+import {
+  AwsConfigRuleSet,
+  EbsDefaultVolumeEncryptionConfig,
+  SecurityConfig,
+  SecurityConfigTypes,
+  IsPublicSsmDoc,
+  ConfigRule,
+} from '../lib/security-config';
 import { CommonValidatorFunctions } from './common/common-validator-functions';
+
+const RESERVED_STATIC_PARAMETER_FOR_RESOURCE_POLICY = 'ATTACHED_RESOURCE_ARN';
 
 export class SecurityConfigValidator {
   constructor(
@@ -27,6 +37,7 @@ export class SecurityConfigValidator {
     accountsConfig: AccountsConfig,
     globalConfig: GlobalConfig,
     organizationConfig: OrganizationConfig,
+    replacementsConfig: ReplacementsConfig | undefined,
     configDir: string,
   ) {
     const errors: string[] = [];
@@ -46,6 +57,9 @@ export class SecurityConfigValidator {
     // Get list of Account names from account config file
     const accountNames = this.getAccountNames(accountsConfig);
 
+    // Validate SSM document name
+    this.validateSsmDocumentNames(ssmDocuments, errors);
+
     // Validate presence of SSM document files
     this.validateSsmDocumentFiles(configDir, ssmDocuments, errors);
 
@@ -58,6 +72,10 @@ export class SecurityConfigValidator {
 
     // Validate custom CMK names
     this.validateCustomKeyName(values, keyNames, errors);
+
+    //
+    // Validate EBS default encryption configuration
+    this.validateEbsEncryptionConfiguration(values.centralSecurityServices.ebsDefaultVolumeEncryption, errors);
 
     //
     // Validate delegated admin account
@@ -98,6 +116,10 @@ export class SecurityConfigValidator {
 
     this.validateAwsCloudWatchLogGroups(values, errors);
     this.validateAwsCloudWatchLogGroupsRetention(values, errors);
+    this.validateResourcePolicyEnforcementConfig(values, ouIdNames, accountNames, errors);
+    this.validateResourcePolicyParameters(configDir, values, replacementsConfig, errors);
+
+    this.validateConfigRuleCmkDependency(values, globalConfig, accountsConfig, errors);
 
     if (errors.length) {
       throw new Error(`${SecurityConfig.FILENAME} has ${errors.length} issues:\n${errors.join('\n')}`);
@@ -115,8 +137,10 @@ export class SecurityConfigValidator {
    */
   private getOuIdNames(organizationConfig: OrganizationConfig): string[] {
     const ouIdNames: string[] = [];
-    for (const organizationalUnit of organizationConfig.organizationalUnits) {
-      ouIdNames.push(organizationalUnit.name);
+    if (organizationConfig.enable) {
+      for (const organizationalUnit of organizationConfig.organizationalUnits ?? []) {
+        ouIdNames.push(organizationalUnit.name);
+      }
     }
     return ouIdNames;
   }
@@ -269,6 +293,19 @@ export class SecurityConfigValidator {
   }
 
   /**
+   * Validate EBS default volume encryption configuration
+   * @param ebsEncryptionConfig EbsDefaultVolumeEncryptionConfig
+   * @param errors string[]
+   */
+  private validateEbsEncryptionConfiguration(ebsEncryptionConfig: EbsDefaultVolumeEncryptionConfig, errors: string[]) {
+    if (ebsEncryptionConfig.excludeRegions && ebsEncryptionConfig.deploymentTargets) {
+      errors.push(
+        `EBS default volume configuration cannot include both deploymentTargets and excludeRegions properties. Please use only one.`,
+      );
+    }
+  }
+
+  /**
    * Function to validate AWS CloudWatch Log Groups configuration
    */
   private validateAwsCloudWatchLogGroups(values: SecurityConfig, errors: string[]) {
@@ -417,6 +454,46 @@ export class SecurityConfigValidator {
       }
     }
   }
+  /**
+   * Function to validate existence of KMS key deployment target Accounts
+   * Make sure deployment target Accounts are part of account config file
+   * @param values
+   */
+  private validateKmsKeyConfigDeploymentTargetAccounts(
+    values: t.TypeOf<typeof SecurityConfigTypes.securityConfig>,
+    accountNames: string[],
+    errors: string[],
+  ) {
+    for (const keySet of values.keyManagementService?.keySets ?? []) {
+      for (const account of keySet.deploymentTargets.accounts ?? []) {
+        if (accountNames.indexOf(account) === -1) {
+          errors.push(
+            `Deployment target account ${account} for KMS key ${keySet.name} does not exists in accounts-config.yaml file.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Validate deployment target accounts for EBS default volume encryption
+   * @param values SecurityConfig
+   * @param ouIdNames string[]
+   * @param errors string[]
+   */
+  private validateEbsEncryptionDeploymentTargetAccounts(
+    values: t.TypeOf<typeof SecurityConfigTypes.securityConfig>,
+    accountNames: string[],
+    errors: string[],
+  ) {
+    for (const account of values.centralSecurityServices.ebsDefaultVolumeEncryption.deploymentTargets?.accounts ?? []) {
+      if (accountNames.indexOf(account) === -1) {
+        errors.push(
+          `Deployment target account ${account} for EBS default volume encryption does not exist in accounts-config.yaml file.`,
+        );
+      }
+    }
+  }
 
   /**
    * Function to validate Deployment targets account name for security services
@@ -432,6 +509,8 @@ export class SecurityConfigValidator {
     this.validateCloudWatchAlarmsDeploymentTargetAccounts(values, accountNames, errors);
     this.validateSsmDocumentsDeploymentTargetAccounts(values, accountNames, errors);
     this.validateCloudWatchLogGroupsDeploymentTargetAccounts(values, accountNames, errors);
+    this.validateKmsKeyConfigDeploymentTargetAccounts(values, accountNames, errors);
+    this.validateEbsEncryptionDeploymentTargetAccounts(values, accountNames, errors);
   }
 
   /**
@@ -517,6 +596,44 @@ export class SecurityConfigValidator {
   }
 
   /**
+   * Function to validate existence of Key Management Service Config deployment target OUs
+   * Make sure deployment target OUs are part of Organization config file
+   * @param values
+   */
+  private validateKmsKeyConfigDeploymentTargetOUs(
+    values: t.TypeOf<typeof SecurityConfigTypes.securityConfig>,
+    ouIdNames: string[],
+    errors: string[],
+  ) {
+    for (const keySet of values.keyManagementService?.keySets ?? []) {
+      for (const ou of keySet.deploymentTargets.organizationalUnits ?? []) {
+        if (ouIdNames.indexOf(ou) === -1) {
+          errors.push(
+            `Deployment target OU ${ou} for KMS key ${keySet.name} does not exists in organization-config.yaml file.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Validate deployment target OUs for EBS default volume encryption
+   * @param values SecurityConfig
+   * @param ouIdNames string[]
+   * @param errors string[]
+   */
+  private validateEbsEncryptionDeploymentTargetOUs(values: SecurityConfig, ouIdNames: string[], errors: string[]) {
+    for (const ou of values.centralSecurityServices.ebsDefaultVolumeEncryption.deploymentTargets?.organizationalUnits ??
+      []) {
+      if (ouIdNames.indexOf(ou) === -1) {
+        errors.push(
+          `Deployment target OU ${ou} for EBS default volume encryption does not exist in organization-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
    * Function to validate Deployment targets OU name for security services
    * @param values
    */
@@ -525,6 +642,8 @@ export class SecurityConfigValidator {
     this.validateCloudWatchAlarmsDeploymentTargetOUs(values, ouIdNames, errors);
     this.validateCloudWatchMetricsDeploymentTargetOUs(values, ouIdNames, errors);
     this.validateConfigRuleDeploymentTargetOUs(values, ouIdNames, errors);
+    this.validateKmsKeyConfigDeploymentTargetOUs(values, ouIdNames, errors);
+    this.validateEbsEncryptionDeploymentTargetOUs(values, ouIdNames, errors);
   }
 
   /**
@@ -653,20 +772,41 @@ export class SecurityConfigValidator {
   ) {
     for (const rule of ruleSet.rules) {
       if (rule.remediation) {
-        // Validate presence of SSM document before used as remediation target
-        if (!ssmDocuments.find(item => item.name === rule.remediation?.targetId)) {
-          errors.push(
-            `Rule: ${rule.name}, remediation target SSM document ${rule.remediation?.targetId} not found in ssm automation document lists`,
-          );
-          // Validate presence of custom rule's remediation SSM document invoke lambda function zip file
-          if (rule.remediation.targetDocumentLambda) {
-            if (!fs.existsSync(path.join(configDir, rule.remediation.targetDocumentLambda.sourceFilePath))) {
-              errors.push(
-                `Rule: ${rule.name}, remediation target SSM document lambda function file ${rule.remediation.targetDocumentLambda.sourceFilePath} not found`,
-              );
+        if (!IsPublicSsmDoc(rule.remediation.targetId)) {
+          // Validate presence of SSM document before used as remediation target
+          if (!ssmDocuments.find(item => item.name === rule.remediation?.targetId)) {
+            errors.push(
+              `Rule: ${rule.name}, remediation target SSM document ${rule.remediation?.targetId} not found in ssm automation document lists`,
+            );
+            // Validate presence of custom rule's remediation SSM document invoke lambda function zip file
+            if (rule.remediation.targetDocumentLambda) {
+              if (!fs.existsSync(path.join(configDir, rule.remediation.targetDocumentLambda.sourceFilePath))) {
+                errors.push(
+                  `Rule: ${rule.name}, remediation target SSM document lambda function file ${rule.remediation.targetDocumentLambda.sourceFilePath} not found`,
+                );
+              }
             }
           }
         }
+      }
+    }
+  }
+
+  /**
+   *
+   */
+  private validateSsmDocumentNames(
+    ssmDocuments: t.TypeOf<typeof SecurityConfigTypes.documentConfig>[],
+    errors: string[],
+  ) {
+    // check if document name falls under the regex specified by API for SSM CreateDocument
+    // ref: https://docs.aws.amazon.com/systems-manager/latest/APIReference/API_CreateDocument.html#systemsmanager-CreateDocument-request-Name
+    const ssmDocumentNameRegex = /^[a-zA-Z0-9_\-.:/]{3,128}$/;
+    for (const document of ssmDocuments) {
+      if (!ssmDocumentNameRegex.test(document.name)) {
+        errors.push(
+          `SSM document: ${document.name} has does not conform with regular expression for Name in CreateDocument API call`,
+        );
       }
     }
   }
@@ -759,5 +899,132 @@ export class SecurityConfigValidator {
         `Delegated admin account '${values.awsConfig.aggregation?.delegatedAdminAccount}' provided for config aggregation does not exist in the accounts-config.yaml file.`,
       );
     }
+  }
+
+  private validateResourcePolicyEnforcementConfig(
+    securityConfig: SecurityConfig,
+    ouIdNames: string[],
+    accountNames: string[],
+    errors: string[],
+  ) {
+    if (!securityConfig.resourcePolicyEnforcement) return;
+    const resourcePolicyEnforcementConfig = securityConfig.resourcePolicyEnforcement;
+    for (const resourcePolicy of resourcePolicyEnforcementConfig.policySets) {
+      for (const ou of resourcePolicy.deploymentTargets.organizationalUnits ?? []) {
+        if (ouIdNames.indexOf(ou) === -1) {
+          errors.push(
+            `Deployment target OU ${ou} for Data Perimeter AWS Config rules does not exists in organization-config.yaml file.`,
+          );
+        }
+      }
+
+      for (const account of resourcePolicy.deploymentTargets.accounts ?? []) {
+        if (accountNames.indexOf(account) === -1) {
+          errors.push(
+            `Deployment target account ${account} for Data Perimeter AWS Config rules does not exists in accounts-config.yaml file.`,
+          );
+        }
+      }
+
+      if (resourcePolicy.inputParameters?.['SourceAccount']) {
+        const sourceAccount = resourcePolicy.inputParameters['SourceAccount'];
+        const accountIdRegex = /^\d{12}$/;
+        if (sourceAccount !== 'ALL' && sourceAccount.split(',').find(accountId => !accountIdRegex.test(accountId))) {
+          errors.push(
+            `parameter 'SourceAccount' in data perimeter can only be 'ALL' or list of valid account ID (12 digits) separated by ','`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Function to validate if static parameter in resource policy templates is defined in replacements config
+   * @param configDir
+   * @param securityConfig
+   * @param replacementConfig
+   * @param errors
+   */
+  private validateResourcePolicyParameters(
+    configDir: string,
+    securityConfig: SecurityConfig,
+    replacementConfig: ReplacementsConfig | undefined,
+    errors: string[],
+  ) {
+    const policyFilePaths = new Set<string>();
+    for (const policySet of securityConfig.resourcePolicyEnforcement?.policySets || []) {
+      policySet.resourcePolicies.map(rp => policyFilePaths.add(rp.document));
+    }
+    CommonValidatorFunctions.validateStaticParameters(
+      replacementConfig,
+      configDir,
+      [...policyFilePaths],
+      new Set([RESERVED_STATIC_PARAMETER_FOR_RESOURCE_POLICY]),
+      errors,
+    );
+  }
+
+  /**
+   * Function to validate AWS Config rules do not use solution defined CMK when global config s3 encryption was disabled.
+   * @param securityConfig
+   * @param globalConfig
+   * @param accountConfig
+   * @param errors
+   * @returns
+   */
+  private validateConfigRuleCmkDependency(
+    securityConfig: SecurityConfig,
+    globalConfig: GlobalConfig,
+    accountConfig: AccountsConfig,
+    errors: string[],
+  ) {
+    if (!globalConfig.s3?.encryption?.deploymentTargets) {
+      return;
+    }
+
+    for (const ruleSet of securityConfig.awsConfig.ruleSets) {
+      for (const rule of ruleSet.rules) {
+        if (this.isConfigRuleCmkDependent(rule)) {
+          const ruleEnvFromDeploymentTarget = CommonValidatorFunctions.getEnvironmentsFromDeploymentTarget(
+            accountConfig,
+            ruleSet.deploymentTargets,
+            globalConfig,
+          );
+          const s3EncryptionEnvFromDeploymentTarget = CommonValidatorFunctions.getEnvironmentsFromDeploymentTarget(
+            accountConfig,
+            globalConfig.s3.encryption.deploymentTargets,
+            globalConfig,
+          );
+
+          const compareDeploymentEnvironments = CommonValidatorFunctions.compareDeploymentEnvironments(
+            ruleEnvFromDeploymentTarget,
+            s3EncryptionEnvFromDeploymentTarget,
+          );
+
+          if (!compareDeploymentEnvironments.match) {
+            errors.push(
+              `There is a parameter in the security-config.yaml file that refers to the solution created KMS encryption replacement ACCEL_LOOKUP::KMS for the remediation Lambda function for AWS Config rule ${rule.name}, however, global-config.yaml disables the creation of CMK.`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Function to check if given config rule uses solution deployed CMK replacement
+   * @param rule
+   * @returns
+   */
+  private isConfigRuleCmkDependent(rule: ConfigRule): ConfigRule | undefined {
+    for (const parameter of rule.remediation?.parameters ?? []) {
+      for (const [value] of Object.entries(parameter)) {
+        if (parameter[value] === '${ACCEL_LOOKUP::KMS}') {
+          return rule;
+        }
+      }
+    }
+
+    return undefined;
   }
 }

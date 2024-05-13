@@ -49,6 +49,7 @@ import {
   AcceleratorStackProps,
   NagSuppressionRuleIds,
 } from './accelerator-stack';
+
 export interface OrganizationsStackProps extends AcceleratorStackProps {
   configDirPath: string;
 }
@@ -58,14 +59,17 @@ export interface OrganizationsStackProps extends AcceleratorStackProps {
  * Organizations Management (Root) account
  */
 export class OrganizationsStack extends AcceleratorStack {
-  private cloudwatchKey: cdk.aws_kms.Key;
-  private centralLogsBucketKey: cdk.aws_kms.Key;
+  /**
+   * KMS Key used to encrypt custom resource CloudWatch environment variables, when undefined default AWS managed key will be used
+   */
+  private cloudwatchKey: cdk.aws_kms.IKey | undefined;
+  private centralLogsBucketKey: cdk.aws_kms.IKey;
   private bucketReplicationProps: BucketReplicationProps;
   private logRetention: number;
   private stackProperties: AcceleratorStackProps;
 
   /**
-   * KMS Key used to encrypt custom resource lambda environment variables
+   * KMS Key used to encrypt custom resource Lambda environment variables, when undefined default AWS managed key will be used
    */
   private lambdaKey: cdk.aws_kms.IKey | undefined;
 
@@ -144,7 +148,7 @@ export class OrganizationsStack extends AcceleratorStack {
       //
       // Enable FMS Delegated Admin Account
       //
-      this.enableFMSDelegatedAdminAccount(this.lambdaKey as cdk.aws_kms.Key, this.cloudwatchKey);
+      this.enableFMSDelegatedAdminAccount({ cloudwatch: this.cloudwatchKey, lambda: this.lambdaKey });
 
       //IdentityCenter Config
       this.enableIdentityCenterDelegatedAdminAccount(securityAdminAccountId);
@@ -277,12 +281,14 @@ export class OrganizationsStack extends AcceleratorStack {
     if (this.stackProperties.globalConfig.reports?.costAndUsageReport && this.props.partition != 'aws-us-gov') {
       this.logger.info('Adding Cost and Usage Reports');
 
+      const serverAccessLogsBucketName = this.getServerAccessLogsBucketName();
+
       const reportBucket = new Bucket(this, 'ReportBucket', {
         encryptionType: BucketEncryptionType.SSE_S3, // CUR does not support KMS CMK
         s3BucketName: `${this.acceleratorResourceNames.bucketPrefixes.costUsage}-${cdk.Stack.of(this).account}-${
           cdk.Stack.of(this).region
         }`,
-        serverAccessLogsBucketName: this.getServerAccessLogsBucketName(),
+        serverAccessLogsBucketName,
         s3LifeCycleRules: this.getS3LifeCycleRules(
           this.stackProperties.globalConfig.reports.costAndUsageReport.lifecycleRules,
         ),
@@ -302,6 +308,19 @@ export class OrganizationsStack extends AcceleratorStack {
           },
         ],
       });
+
+      if (!serverAccessLogsBucketName) {
+        // AwsSolutions-S1: The S3 Bucket has server access logs disabled
+        this.nagSuppressionInputs.push({
+          id: NagSuppressionRuleIds.S1,
+          details: [
+            {
+              path: `/${this.stackName}/ReportBucket/Resource/Resource`,
+              reason: 'Due to configuration settings, server access logs have been disabled.',
+            },
+          ],
+        });
+      }
 
       new ReportDefinition(this, 'ReportDefinition', {
         compression: this.stackProperties.globalConfig.reports.costAndUsageReport.compression,
@@ -401,7 +420,7 @@ export class OrganizationsStack extends AcceleratorStack {
   /**
    * Function to enable FMS delegated admin account
    */
-  private enableFMSDelegatedAdminAccount(lambdaKey: cdk.aws_kms.Key, cloudwatchKey: cdk.aws_kms.Key) {
+  private enableFMSDelegatedAdminAccount(key: { cloudwatch?: cdk.aws_kms.IKey; lambda?: cdk.aws_kms.IKey }) {
     const fmsConfig = this.stackProperties.networkConfig.firewallManagerService;
     if (
       fmsConfig &&
@@ -409,7 +428,10 @@ export class OrganizationsStack extends AcceleratorStack {
       this.props.organizationConfig.enable &&
       (this.props.partition === 'aws' || this.props.partition === 'aws-us-gov' || this.props.partition === 'aws-cn')
     ) {
-      const fmsServiceLinkedRole = this.createAwsFirewallManagerServiceLinkedRole(cloudwatchKey, lambdaKey);
+      const fmsServiceLinkedRole = this.createAwsFirewallManagerServiceLinkedRole({
+        cloudwatch: key.cloudwatch,
+        lambda: key.lambda,
+      });
 
       if (fmsServiceLinkedRole) {
         const adminAccountName = fmsConfig.delegatedAdminAccount;

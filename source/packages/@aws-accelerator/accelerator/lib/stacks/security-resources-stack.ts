@@ -17,7 +17,14 @@ import { pascalCase } from 'change-case';
 import { Construct } from 'constructs';
 import path from 'path';
 import { Tag as ConfigRuleTag } from '@aws-sdk/client-config-service';
-import { AccountCloudTrailConfig, AwsConfigRuleSet, ConfigRule, Region, Tag } from '@aws-accelerator/config';
+import {
+  AccountCloudTrailConfig,
+  AwsConfigRuleSet,
+  ConfigRule,
+  Region,
+  Tag,
+  IsPublicSsmDoc,
+} from '@aws-accelerator/config';
 
 import {
   ConfigServiceRecorder,
@@ -62,9 +69,9 @@ type CustomConfigRuleType = cdk.aws_config.ManagedRule | cdk.aws_config.CustomRu
  * Security Stack, configures local account security services
  */
 export class SecurityResourcesStack extends AcceleratorStack {
-  readonly centralLogsBucketKey: cdk.aws_kms.Key;
-  readonly cloudwatchKey: cdk.aws_kms.IKey;
-  readonly lambdaKey: cdk.aws_kms.IKey;
+  readonly centralLogsBucketKey: cdk.aws_kms.IKey;
+  readonly cloudwatchKey: cdk.aws_kms.IKey | undefined;
+  readonly lambdaKey: cdk.aws_kms.IKey | undefined;
   readonly auditAccountId: string;
   readonly logArchiveAccountId: string;
   readonly stackProperties: AcceleratorStackProps;
@@ -434,7 +441,7 @@ export class SecurityResourcesStack extends AcceleratorStack {
             this,
             `${this.props.prefixes.ssmParamName}/kms/${logGroupItem.encryption?.kmsKeyName}/key-arn`,
           ).toString();
-        } else if (logGroupItem.encryption?.useLzaManagedKey) {
+        } else if (logGroupItem.encryption?.useLzaManagedKey && this.cloudwatchKey) {
           keyArn = this.cloudwatchKey.keyArn;
         } else if (logGroupItem.encryption?.kmsKeyArn) {
           keyArn = logGroupItem.encryption?.kmsKeyArn;
@@ -839,16 +846,21 @@ export class SecurityResourcesStack extends AcceleratorStack {
       });
     }
 
+    let remediationTargetId = `arn:${cdk.Stack.of(this).partition}:ssm:${cdk.Stack.of(this).region}:${
+      rule.remediation.targetAccountName
+        ? this.props.accountsConfig.getAccountId(rule.remediation.targetAccountName)
+        : this.props.accountsConfig.getAuditAccountId()
+    }:document/${rule.remediation.targetId}`;
+
+    if (IsPublicSsmDoc(rule.remediation.targetId)) {
+      remediationTargetId = rule.remediation.targetId;
+    }
+
     new cdk.aws_config.CfnRemediationConfiguration(this, pascalCase(rule.name) + '-Remediation', {
       configRuleName: rule.name,
-      targetId: `arn:${cdk.Stack.of(this).partition}:ssm:${cdk.Stack.of(this).region}:${
-        rule.remediation.targetAccountName
-          ? this.props.accountsConfig.getAccountId(rule.remediation.targetAccountName)
-          : this.props.accountsConfig.getAuditAccountId()
-      }:document/${rule.remediation.targetId}`,
+      targetId: remediationTargetId,
       targetVersion: rule.remediation.targetVersion,
       targetType: 'SSM_DOCUMENT',
-
       automatic: rule.remediation.automatic,
       maximumAutomaticAttempts: rule.remediation.maximumAutomaticAttempts,
       retryAttemptSeconds: rule.remediation.retryAttemptSeconds,
@@ -1354,6 +1366,7 @@ export class SecurityResourcesStack extends AcceleratorStack {
     if (
       !this.isAccountExcluded(this.props.globalConfig.logging.sessionManager.excludeAccounts) &&
       !this.isRegionExcluded(this.props.globalConfig.logging.sessionManager.excludeRegions)
+      // remove region exclude, set to home region
     ) {
       if (
         this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs ||
@@ -1369,48 +1382,18 @@ export class SecurityResourcesStack extends AcceleratorStack {
           cloudWatchEncryptionEnabled:
             this.props.partition !== 'aws-us-gov' &&
             this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs,
-          attachPolicyToIamRoles: this.props.globalConfig.logging.sessionManager.attachPolicyToIamRoles,
           cloudWatchEncryptionKey: this.cloudwatchKey,
-          constructLoggingKmsKey: this.cloudwatchKey,
           logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays,
           region: cdk.Stack.of(this).region,
-          acceleratorPrefix: this.props.prefixes.accelerator,
           rolesInAccounts: this.props.globalConfig.iamRoleSsmParameters,
-        });
-
-        // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
-        // rule suppression with evidence for this permission.
-        this.nagSuppressionInputs.push({
-          id: NagSuppressionRuleIds.IAM5,
-          details: [
-            {
-              path: `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Policy/Resource`,
-              reason:
-                'Policy needed access to all S3 objects for the account to put objects into the access log bucket',
-            },
-          ],
-        });
-
-        // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies.
-        // rule suppression with evidence for this permission.
-        this.nagSuppressionInputs.push({
-          id: NagSuppressionRuleIds.IAM4,
-          details: [
-            {
-              path: `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Role/Resource`,
-              reason: 'Create an IAM managed Policy for users to be able to use Session Manager with KMS encryption',
-            },
-          ],
-        });
-
-        this.nagSuppressionInputs.push({
-          id: NagSuppressionRuleIds.IAM5,
-          details: [
-            {
-              path: `/${this.stackName}/SsmSessionManagerSettings/SessionPolicy${cdk.Stack.of(this).region}/Resource`,
-              reason: 'Allows only specific log group',
-            },
-          ],
+          prefixes: {
+            accelerator: this.props.prefixes.accelerator,
+            ssmLog: this.props.prefixes.ssmLogName,
+          },
+          ssmKeyDetails: {
+            alias: this.acceleratorResourceNames.customerManagedKeys.ssmKey.alias,
+            description: this.acceleratorResourceNames.customerManagedKeys.ssmKey.description,
+          },
         });
       }
     }

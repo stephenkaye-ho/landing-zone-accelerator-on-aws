@@ -11,7 +11,11 @@
  *  and limitations under the License.
  */
 import { ShareTargets } from '../../lib/common-types';
-import { ApplicationLoadBalancerConfig } from '../../lib/customizations-config';
+import {
+  ApplicationLoadBalancerConfig,
+  CustomizationsConfig,
+  Ec2FirewallInstanceConfig,
+} from '../../lib/customizations-config';
 import {
   NetworkConfig,
   NetworkConfigTypes,
@@ -27,13 +31,21 @@ import {
   VpcTemplatesConfig,
 } from '../../lib/network-config';
 import { NetworkValidatorFunctions } from './network-validator-functions';
+import * as cdk from 'aws-cdk-lib';
 
 /**
  * Class to validate Vpcs
  */
 export class VpcValidator {
   private centralEndpointVpcRegions: string[];
-  constructor(values: NetworkConfig, helpers: NetworkValidatorFunctions, errors: string[]) {
+  private customizationsConfig?: CustomizationsConfig;
+  constructor(
+    values: NetworkConfig,
+    helpers: NetworkValidatorFunctions,
+    errors: string[],
+    customizationsConfig?: CustomizationsConfig,
+  ) {
+    this.customizationsConfig = customizationsConfig;
     //
     // Determine if there is a central endpoint VPC
     //
@@ -454,6 +466,11 @@ export class VpcValidator {
     // Validate network firewall route entry
     this.validateNfwRouteEntry(routeTableEntryItem, routeTableName, vpcItem, networkFirewalls, helpers, errors);
 
+    // Validate network interface route entry
+    if (routeTableEntryItem.type === 'networkInterface') {
+      this.validateNetworkInterfaceRouteEntry(routeTableEntryItem, routeTableName, vpcItem, helpers, errors);
+    }
+
     // Throw error if NAT gateway doesn't exist
     if (
       routeTableEntryItem.type === 'natGateway' &&
@@ -479,6 +496,134 @@ export class VpcValidator {
       errors.push(
         `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} target ${routeTableEntryItem.target} does not exist`,
       );
+    }
+  }
+
+  /**
+   * Validate network firewall route entry
+   * @param routeTableEntryItem
+   * @param routeTableName
+   * @param vpcItem
+   * @param helpers
+   * @param errors
+   */
+  private validateNetworkInterfaceRouteEntry(
+    routeTableEntryItem: RouteTableEntryConfig,
+    routeTableName: string,
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    helpers: NetworkValidatorFunctions,
+    errors: string[],
+  ) {
+    if (!routeTableEntryItem.target) {
+      errors.push(
+        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} with type networkInterface requires the 'target' property`,
+      );
+    }
+
+    if (
+      !helpers.matchesRegex(routeTableEntryItem.target!, '\\${ACCEL_LOOKUP::EC2:ENI_([a-zA-Z0-9-/:]*)}') &&
+      !helpers.matchesRegex(routeTableEntryItem.target!, '^eni-(\\d|[a-f]){17}$')
+    ) {
+      errors.push(
+        `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} has invalid target. Target may be an ENI Id or accepted pattern: "^\\$\{ACCEL_LOOKUP::EC2:ENI_([a-zA-Z0-9-/:]*)}" Value entered: ${routeTableEntryItem.target} `,
+      );
+    }
+
+    if (helpers.matchesRegex(routeTableEntryItem.target!, '\\${ACCEL_LOOKUP::EC2:ENI_([a-zA-Z0-9-/:]*)}')) {
+      if (!this.isValidFirewallReference(routeTableEntryItem, vpcItem.name, errors)) {
+        errors.push(
+          `[Route table ${routeTableName} for VPC ${vpcItem.name}]: route entry ${routeTableEntryItem.name} has invalid lookup target. Accepted pattern: "^\\$\{ACCEL_LOOKUP::EC2:ENI_([a-zA-Z0-9-/:]*)}" Value entered: ${routeTableEntryItem.target}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Validates that the referenced firewall exists in customizations config
+   * @param routeTableEntryItem: RouteTableEntryConfig,
+   * @param errors string[]
+   * @returns boolean
+   */
+  private isValidFirewallReference(
+    routeTableEntryItem: RouteTableEntryConfig,
+    vpcName: string,
+    errors: string[],
+  ): boolean {
+    //
+    // Check that customizations config is defined
+    if (!this.customizationsConfig) {
+      errors.push(
+        `[Route Table entry: ${routeTableEntryItem.name}]: EC2 firewall reference variable entered but customizations-config.yaml is not defined.`,
+      );
+      return false;
+    } else {
+      // Check that firewall exists
+      const lookupComponents = routeTableEntryItem.target!.split(':');
+      const eniIndex = lookupComponents[3].split('_').pop();
+      const firewallName = lookupComponents[4].replace(/\}$/, '');
+      const firewall = this.customizationsConfig.firewalls?.instances?.find(instance => instance.name === firewallName);
+
+      if (!firewall) {
+        errors.push(
+          `[Route Table entry: ${routeTableEntryItem.name}]: EC2 firewall instance "${firewallName}" is not defined in customizations-config.yaml`,
+        );
+        return false;
+      }
+
+      if (!eniIndex) {
+        errors.push(
+          `[Route Table entry: ${routeTableEntryItem.name}]: Unable to parse ENI index of EC2 firewall instance "${firewallName}" from pattern ${routeTableEntryItem.target}`,
+        );
+        return false;
+      }
+
+      if (vpcName !== firewall.vpc) {
+        errors.push(
+          `[Route Table entry: ${routeTableEntryItem.name}]: Firewall "${firewallName}" in route target ${routeTableEntryItem.target} must exist in the same VPC the route is created`,
+        );
+        return false;
+      }
+      //
+      // Check device index
+      this.validateFirewallInterface(routeTableEntryItem.name, firewall, eniIndex, errors);
+    }
+    return true;
+  }
+
+  /**
+   * Validates that the referenced network interface has an elastic IP associated or sourceDestCheck set to false
+   * @param routeTableEntryName string
+   * @param firewall Ec2FirewallInstanceConfig
+   * @param eniIndex string
+   * @param errors string[]
+   */
+  private validateFirewallInterface(
+    routeTableEntryName: string,
+    firewall: Ec2FirewallInstanceConfig,
+    eniIndex: string,
+    errors: string[],
+  ) {
+    if (!firewall.launchTemplate.networkInterfaces) {
+      errors.push(
+        `[Route Table entry: ${routeTableEntryName}]: EC2 firewall instance "${firewall.name}" launch template does not have network interfaces defined in customizations-config.yaml`,
+      );
+    } else {
+      const deviceIndex = Number(eniIndex);
+      if (deviceIndex > firewall.launchTemplate.networkInterfaces.length - 1) {
+        errors.push(
+          `[Route Table entry: ${routeTableEntryName}]: EC2 firewall instance "${firewall.name}" device index ${deviceIndex} does not exist in customizations-config.yaml`,
+        );
+      } else {
+        const networkInterface = firewall.launchTemplate.networkInterfaces[deviceIndex];
+        if (
+          !networkInterface.associateElasticIp &&
+          (networkInterface.sourceDestCheck === undefined || networkInterface.sourceDestCheck === true)
+        ) {
+          errors.push(
+            `[Route Table entry: ${routeTableEntryName}]: EC2 firewall instance "${firewall.name}" device index ${deviceIndex} must have the associateElasticIp set to true or sourceDestCheck property set to false in customizations-config.yaml`,
+          );
+        }
+      }
     }
   }
 
@@ -520,9 +665,14 @@ export class VpcValidator {
         // Validate target exists
         if (
           entry.type &&
-          ['gatewayLoadBalancerEndpoint', 'natGateway', 'networkFirewall', 'transitGateway', 'vpcPeering'].includes(
-            entry.type,
-          )
+          [
+            'gatewayLoadBalancerEndpoint',
+            'natGateway',
+            'networkFirewall',
+            'networkInterface',
+            'transitGateway',
+            'vpcPeering',
+          ].includes(entry.type)
         ) {
           this.validateRouteEntryTarget(entry, routeTableItem.name, vpcItem, values, helpers, errors);
         }
@@ -1571,47 +1721,13 @@ export class VpcValidator {
   ): boolean {
     const toFromPorts = ['fromPort', 'toPort'];
     const tcpUdpPorts = ['tcpPorts', 'udpPorts'];
-    const toFromTypes = ['ICMP', 'TCP', 'UDP'];
-    const tcpUdpTypes = ['TCP', 'UDP'];
     let allValid = true;
 
     vpcItem.securityGroups?.forEach(group => {
       group.inboundRules.forEach(inbound => {
         const keys = helpers.getObjectKeys(inbound);
         if (inbound.types) {
-          // Validate types and tcpPorts/udpPorts are not defined in the same rule
-          if (keys.some(key => tcpUdpPorts.includes(key))) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: inboundRules cannot contain ${tcpUdpPorts} properties when types property is defined`,
-            );
-          }
-          // Validate type is correct if using fromPort/toPort
-          if (
-            inbound.types.some(type => toFromTypes.includes(type)) &&
-            toFromPorts.some(item => !keys.includes(item))
-          ) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: inboundRules must contain ${toFromPorts} properties when one of the following types is specified: ${toFromTypes}`,
-            );
-          }
-          if (
-            inbound.types.some(type => !toFromTypes.includes(type)) &&
-            toFromPorts.some(item => keys.includes(item))
-          ) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: inboundRules may only contain ${toFromPorts} properties when one of the following types is specified: ${toFromTypes}`,
-            );
-          }
-          // Validate both TCP/UDP and ICMP are not used in the same rule
-          if (inbound.types.some(type => tcpUdpTypes.includes(type)) && inbound.types.includes('ICMP')) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: inboundRules cannot contain both ICMP and TCP/UDP types in the same rule`,
-            );
-          }
+          allValid = this.securityGroupValidateTypes(group, inbound, keys, vpcItem, errors);
         } else {
           // Validate to/fromPorts don't exist
           if (toFromPorts.some(item => keys.includes(item))) {
@@ -1621,12 +1737,15 @@ export class VpcValidator {
             );
           }
           // Validate tcpPorts/udpPorts exists
-          if (!inbound.tcpPorts && !inbound.udpPorts) {
+          if (!inbound.tcpPorts && !inbound.udpPorts && !inbound.ipProtocols) {
             allValid = false;
             errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: inboundRules must contain one of ${tcpUdpPorts} properties when types property is undefined`,
+              `[VPC ${vpcItem.name} security group ${group.name}]: inboundRules must contain one of ${tcpUdpPorts} properties when both the types and ipProtocols properties are undefined.`,
             );
           }
+        }
+        if (inbound.ipProtocols) {
+          allValid = this.securityGroupValidateIpProtocols(group, inbound, vpcItem, errors);
         }
       });
     });
@@ -1647,47 +1766,13 @@ export class VpcValidator {
   ): boolean {
     const toFromPorts = ['fromPort', 'toPort'];
     const tcpUdpPorts = ['tcpPorts', 'udpPorts'];
-    const toFromTypes = ['ICMP', 'TCP', 'UDP'];
-    const tcpUdpTypes = ['TCP', 'UDP'];
     let allValid = true;
 
     vpcItem.securityGroups?.forEach(group => {
       group.outboundRules.forEach(outbound => {
         const keys = helpers.getObjectKeys(outbound);
         if (outbound.types) {
-          // Validate types and tcpPorts/udpPorts are not defined in the same rule
-          if (keys.some(key => tcpUdpPorts.includes(key))) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: outboundRules cannot contain ${tcpUdpPorts} properties when types property is defined`,
-            );
-          }
-          // Validate type is correct if using fromPort/toPort
-          if (
-            outbound.types.some(type => toFromTypes.includes(type)) &&
-            toFromPorts.some(item => !keys.includes(item))
-          ) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: outboundRules must contain ${toFromPorts} properties when one of the following types is specified: ${toFromTypes}`,
-            );
-          }
-          if (
-            outbound.types.some(type => !toFromTypes.includes(type)) &&
-            toFromPorts.some(item => keys.includes(item))
-          ) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: outboundRules may only contain ${toFromPorts} properties when one of the following types is specified: ${toFromTypes}`,
-            );
-          }
-          // Validate both TCP/UDP and ICMP are not used in the same rule
-          if (outbound.types.some(type => tcpUdpTypes.includes(type)) && outbound.types.includes('ICMP')) {
-            allValid = false;
-            errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: outboundRules cannot contain both ICMP and TCP/UDP types in the same rule`,
-            );
-          }
+          allValid = this.securityGroupValidateTypes(group, outbound, keys, vpcItem, errors);
         } else {
           // Validate to/fromPorts don't exist
           if (toFromPorts.some(item => keys.includes(item))) {
@@ -1697,15 +1782,117 @@ export class VpcValidator {
             );
           }
           // Validate tcpPorts/udpPorts exists
-          if (!outbound.tcpPorts && !outbound.udpPorts) {
+          if (!outbound.tcpPorts && !outbound.udpPorts && !outbound.ipProtocols) {
             allValid = false;
             errors.push(
-              `[VPC ${vpcItem.name} security group ${group.name}]: outboundRules must contain one of ${tcpUdpPorts} properties when types property is undefined`,
+              `[VPC ${vpcItem.name} security group ${group.name}]: outboundRules must contain one of ${tcpUdpPorts} properties when both the types and ipProtocols properties are undefined.`,
             );
           }
         }
+        if (outbound.ipProtocols) {
+          allValid = this.securityGroupValidateIpProtocols(group, outbound, vpcItem, errors);
+        }
       });
     });
+    return allValid;
+  }
+
+  /**
+   * Validate security group types
+   * @param securityGroupItem
+   * @param vpcItem
+   * @param helpers
+   * @param errors
+   */
+  private securityGroupValidateTypes(
+    group: SecurityGroupConfig,
+    securityGroupItem: SecurityGroupRuleConfig,
+    keys: string[],
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    errors: string[],
+  ): boolean {
+    let allValid = true;
+    const toFromPorts = ['fromPort', 'toPort'];
+    const tcpUdpPorts = ['tcpPorts', 'udpPorts'];
+    const toFromTypes = ['ICMP', 'TCP', 'UDP'];
+    const tcpUdpTypes = ['TCP', 'UDP'];
+
+    // Validate types and tcpPorts/udpPorts are not defined in the same rule
+    if (keys.some(key => tcpUdpPorts.includes(key))) {
+      allValid = false;
+      errors.push(
+        `[VPC ${vpcItem.name} security group ${group.name}]: Rules cannot contain ${tcpUdpPorts} properties when types property is defined`,
+      );
+    }
+    // Validate type is correct if using fromPort/toPort
+    if (
+      securityGroupItem.types!.some(type => toFromTypes.includes(type)) &&
+      toFromPorts.some(item => !keys.includes(item))
+    ) {
+      allValid = false;
+      errors.push(
+        `[VPC ${vpcItem.name} security group ${group.name}]: Rules must contain ${toFromPorts} properties when one of the following types is specified: ${toFromTypes}`,
+      );
+    }
+    if (
+      securityGroupItem.types!.some(type => !toFromTypes.includes(type)) &&
+      toFromPorts.some(item => keys.includes(item))
+    ) {
+      allValid = false;
+      errors.push(
+        `[VPC ${vpcItem.name} security group ${group.name}]: Rules may only contain ${toFromPorts} properties when one of the following types is specified: ${toFromTypes}`,
+      );
+    }
+    // Validate both TCP/UDP and ICMP are not used in the same rule
+    if (
+      securityGroupItem.types!.some(type => tcpUdpTypes.includes(type)) &&
+      securityGroupItem.types!.includes('ICMP')
+    ) {
+      allValid = false;
+      errors.push(
+        `[VPC ${vpcItem.name} security group ${group.name}]: Rules cannot contain both ICMP and TCP/UDP types in the same rule`,
+      );
+    }
+    if (securityGroupItem.ipProtocols) {
+      allValid = false;
+      errors.push(
+        `[VPC ${vpcItem.name} security group ${group.name}]: Rules cannot contain both types and ipProtocols for the same rule. Create separate rules for both.`,
+      );
+    }
+    return allValid;
+  }
+
+  /**
+   * Validate security group ip protocols
+   * @param securityGroupItem
+   * @param vpcItem
+   * @param helpers
+   * @param errors
+   */
+  private securityGroupValidateIpProtocols(
+    group: SecurityGroupConfig,
+    securityGroupItem: SecurityGroupRuleConfig,
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    errors: string[],
+  ): boolean {
+    let allValid = true;
+    const invalidProtocols: string[] = [];
+    for (const ipProtocolItem of securityGroupItem.ipProtocols ?? []) {
+      const protocolExists = ipProtocolItem in cdk.aws_ec2.Protocol;
+      if (!protocolExists) {
+        if (!invalidProtocols.includes(ipProtocolItem)) {
+          invalidProtocols.push(ipProtocolItem);
+        }
+      }
+    }
+    if (invalidProtocols.length > 0) {
+      allValid = false;
+      errors.push(
+        `[VPC ${vpcItem.name} security group ${
+          group.name
+        }]: Is using the following unsupported IP Protocols: [${invalidProtocols.join(', ')}]`,
+      );
+    }
     return allValid;
   }
 
@@ -2167,6 +2354,10 @@ export class VpcValidator {
     this.validateAlbConfigForExistingSubnets(vpcItem, helpers, errors);
     // Validate that Application Load Balancer that is using shared targets is using subnets that are using shared target.
     this.validateSharedAlbSubnets(vpcItem, helpers, errors);
+    // Validate subnet share target ou names
+    this.validateVpcSubnetShareTargetOUs(vpcItem, helpers, errors);
+    // Validate subnet share target account names
+    this.validateVpcSubnetShareTargetAccounts(vpcItem, helpers, errors);
   }
 
   /**
@@ -2380,6 +2571,50 @@ export class VpcValidator {
         if (missingAccountIds.length > 0) {
           errors.push(
             `The Application Load Balancer ${albItem.name} is deployed to multiple accounts and using subnets that aren't available. Please make sure your sharedTargets configuration for your subnet makes the subnet available for the ALB.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Validate Subnet share target OU names
+   * @param vpcItem
+   * @param helpers
+   * @param errors
+   */
+  private validateVpcSubnetShareTargetOUs(
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    helpers: NetworkValidatorFunctions,
+    errors: string[],
+  ) {
+    for (const subnetItem of vpcItem.subnets ?? []) {
+      for (const ou of subnetItem.shareTargets?.organizationalUnits ?? []) {
+        if (!helpers.ouExists(ou)) {
+          errors.push(
+            `[VPC ${vpcItem.name} subnet ${subnetItem.name}]: Shared Target OU ${ou} does not exist in organization-config.yaml file.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Validate Subnet share target account names
+   * @param vpcItem
+   * @param helpers
+   * @param errors
+   */
+  private validateVpcSubnetShareTargetAccounts(
+    vpcItem: VpcConfig | VpcTemplatesConfig,
+    helpers: NetworkValidatorFunctions,
+    errors: string[],
+  ) {
+    for (const subnetItem of vpcItem.subnets ?? []) {
+      for (const account of subnetItem.shareTargets?.accounts ?? []) {
+        if (!helpers.accountExists(account)) {
+          errors.push(
+            `[VPC ${vpcItem.name} subnet ${subnetItem.name}]: Shared Target account ${account} does not exist in accounts-config.yaml file.`,
           );
         }
       }

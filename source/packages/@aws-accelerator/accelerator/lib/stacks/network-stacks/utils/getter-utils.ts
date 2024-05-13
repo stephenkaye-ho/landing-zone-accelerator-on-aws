@@ -255,6 +255,23 @@ export function getVpcConfig(
 }
 
 /**
+ * Returns the name of the account owner of a VPC name from a given list of configurations if it exists
+ * @param vpcResources
+ * @param vpcName
+ * @returns
+ */
+export function getVpcOwnerAccountName(vpcResources: (VpcConfig | VpcTemplatesConfig)[], vpcName: string): string {
+  const vpcConfig = getVpcConfig(vpcResources, vpcName);
+
+  if (vpcConfig instanceof VpcTemplatesConfig) {
+    logger.error(`VPC Template ${vpcName} does not include 'account' property`);
+    throw new Error(`Configuration validation failed at runtime.`);
+  }
+
+  return (vpcConfig as VpcConfig).account;
+}
+
+/**
  * Returns a subnet configuration object from a given list of configurations if it exists
  * @param vpcItem
  * @param subnetName
@@ -310,51 +327,6 @@ export function getCustomerGatewayName(customerGateways: CustomerGatewayConfig[]
 }
 
 /**
- * Returns a physical ID mapping for an availability zone respective to an AWS region.
- * @param region
- * @returns
- */
-export function getAvailabilityZoneMap(region: string) {
-  const availabilityZoneIdMap = new Map<string, string>([
-    ['us-east-1', 'use1-az'],
-    ['us-east-2', 'use2-az'],
-    ['us-west-1', 'usw1-az'],
-    ['us-west-2', 'usw2-az'],
-    ['ca-central-1', 'cac1-az'],
-    ['ap-east-1', 'ape1-az'],
-    ['ap-south-1', 'aps1-az'],
-    ['ap-south-2', 'aps2-az'],
-    ['ap-northeast-1', 'apne1-az'],
-    ['ap-northeast-2', 'apne2-az'],
-    ['ap-northeast-3', 'apne3-az'],
-    ['ap-southeast-1', 'apse1-az'],
-    ['ap-southeast-2', 'apse2-az'],
-    ['ap-southeast-3', 'apse3-az'],
-    ['ap-southeast-4', 'apse4-az'],
-    ['af-south-1', 'afs1-az'],
-    ['eu-central-1', 'euc1-az'],
-    ['eu-west-1', 'euw1-az'],
-    ['eu-west-2', 'euw2-az'],
-    ['eu-west-3', 'euw3-az'],
-    ['eu-north-1', 'eun1-az'],
-    ['eu-central-2', 'euc2-az'],
-    ['eu-south-1', 'eus1-az'],
-    ['eu-south-2', 'eus2-az'],
-    ['sa-east-1', 'sae1-az'],
-    ['ma-central-1', 'mec1-az'],
-    ['ma-south-1', 'mes1-az'],
-    ['us-gov-west-1', 'usgw1-az'],
-    ['us-gov-east-1', 'usge1-az'],
-  ]);
-  const availabilityZoneId = availabilityZoneIdMap.get(region);
-  if (!availabilityZoneIdMap.get(region)) {
-    logger.error(`The ${region} provided does not support Physical AZ IDs.`);
-    throw new Error(`Configuration validation failed at runtime.`);
-  }
-  return availabilityZoneId;
-}
-
-/**
  * Returns all keys with defined values for a given object
  * @param obj object
  * @returns string[]
@@ -367,4 +339,41 @@ export function getObjectKeys(obj: object): string[] {
     }
   }
   return keys;
+}
+
+/**
+ * Parse the details of an ENI lookup on a firewall instance
+ * @param lookupType
+ * @param routeTableEntryName
+ * @param routeTarget
+ */
+export function getNetworkInterfaceLookupDetails(
+  lookupType: 'ENI_INDEX' | 'FIREWALL_NAME',
+  routeTableEntryName: string,
+  routeTarget: string | undefined,
+): string {
+  if (!routeTarget) {
+    logger.error(`Unable to retrieve target ${routeTarget} for route table entry ${routeTableEntryName}`);
+    throw new Error(`Configuration validation failed at runtime.`);
+  }
+
+  const lookupComponents = routeTarget.split(':');
+  const eniIndex = lookupComponents[3].split('_').pop();
+  const firewallName = lookupComponents[4].replace(/\}$/, '');
+
+  if (!eniIndex) {
+    logger.error(
+      `Unable to retrieve deviceIndex from lookup ${routeTarget} for route table entry ${routeTableEntryName}`,
+    );
+    throw new Error(`Configuration validation failed at runtime.`);
+  }
+
+  if (lookupType === 'ENI_INDEX') {
+    return eniIndex;
+  } else if (lookupType === 'FIREWALL_NAME') {
+    return firewallName;
+  } else {
+    logger.error(`Invalid lookup type passed`);
+    throw new Error(`Configuration validation failed at runtime.`);
+  }
 }

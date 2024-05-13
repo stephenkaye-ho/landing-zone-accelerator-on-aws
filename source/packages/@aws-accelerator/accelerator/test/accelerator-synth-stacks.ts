@@ -24,6 +24,7 @@ import {
   IamConfig,
   NetworkConfig,
   OrganizationConfig,
+  ReplacementsConfig,
   SecurityConfig,
 } from '@aws-accelerator/config';
 
@@ -52,6 +53,7 @@ import { PrepareStack } from '../lib/stacks/prepare-stack';
 import { SecurityAuditStack } from '../lib/stacks/security-audit-stack';
 import { SecurityResourcesStack } from '../lib/stacks/security-resources-stack';
 import { SecurityStack } from '../lib/stacks/security-stack';
+import { ResourcePolicyEnforcementStack } from '../lib/stacks/resource-policy-enforcement-stack';
 
 export class AcceleratorSynthStacks {
   private readonly configFolderName: string;
@@ -92,15 +94,20 @@ export class AcceleratorSynthStacks {
       customizationsConfig = new CustomizationsConfig();
     }
 
+    const accountsConfig = AccountsConfig.load(this.configDirPath);
+    const orgConfig = OrganizationConfig.load(this.configDirPath);
+    const replacementsConfig = ReplacementsConfig.load(this.configDirPath, accountsConfig);
+    replacementsConfig.loadReplacementValues({}, orgConfig.enable);
     this.props = {
       configDirPath: this.configDirPath,
-      accountsConfig: AccountsConfig.load(this.configDirPath),
+      accountsConfig: accountsConfig,
       customizationsConfig,
       globalConfig,
       iamConfig: IamConfig.load(this.configDirPath),
       networkConfig: NetworkConfig.load(this.configDirPath),
       organizationConfig: OrganizationConfig.load(this.configDirPath),
       securityConfig: SecurityConfig.load(this.configDirPath),
+      replacementsConfig: replacementsConfig,
       partition: this.partition,
       globalRegion: this.globalRegion,
       centralizedLoggingRegion: globalConfig.logging.centralizedLoggingRegion ?? globalConfig.homeRegion,
@@ -116,10 +123,13 @@ export class AcceleratorSynthStacks {
         secretName: '/accelerator',
         trailLogName: 'aws-accelerator',
         databaseName: 'aws-accelerator',
+        ssmLogName: 'aws-accelerator',
       },
       enableSingleAccountMode: false,
       useExistingRoles: false,
       centralLogsBucketKmsKeyArn: 'arn:aws:kms:us-east-1:111111111111:key/00000000-0000-0000-0000-000000000000',
+      isDiagnosticsPackEnabled: 'Yes',
+      pipelineAccountId: '111111111111',
     };
 
     this.homeRegion = this.props.globalConfig.homeRegion;
@@ -183,6 +193,9 @@ export class AcceleratorSynthStacks {
         break;
       case AcceleratorStage.SECURITY_RESOURCES:
         this.synthSecurityResourcesStacks();
+        break;
+      case AcceleratorStage.RESOURCE_POLICY_ENFORCEMENT:
+        this.synthResourcePolicyEnforcementStacks();
         break;
       case AcceleratorStage.SECURITY:
         this.synthSecurityStacks();
@@ -633,6 +646,33 @@ export class AcceleratorSynthStacks {
           new SecurityResourcesStack(
             this.app,
             `${AcceleratorStackNames[AcceleratorStage.SECURITY_RESOURCES]}-${accountId}-${region}`,
+            {
+              env: {
+                account: accountId,
+                region: region,
+              },
+              ...this.props,
+            },
+          ),
+        );
+      }
+    }
+  }
+  /**
+   * synth ResourcePolicyEnforcementStack
+   */
+  private synthResourcePolicyEnforcementStacks() {
+    for (const region of this.props.globalConfig.enabledRegions) {
+      for (const account of [
+        ...this.props.accountsConfig.mandatoryAccounts,
+        ...this.props.accountsConfig.workloadAccounts,
+      ]) {
+        const accountId = this.props.accountsConfig.getAccountId(account.name);
+        this.stacks.set(
+          `${account.name}-${region}`,
+          new ResourcePolicyEnforcementStack(
+            this.app,
+            `${AcceleratorStackNames[AcceleratorStage.RESOURCE_POLICY_ENFORCEMENT]}-${accountId}-${region}`,
             {
               env: {
                 account: accountId,

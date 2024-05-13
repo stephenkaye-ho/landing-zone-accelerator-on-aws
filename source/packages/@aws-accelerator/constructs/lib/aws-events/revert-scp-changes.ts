@@ -39,13 +39,13 @@ export interface RevertScpChangesProps {
    */
   readonly homeRegion: string;
   /**
-   * Lambda log group encryption key
+   * Lambda log group encryption key, when undefined default AWS managed key will be used
    */
-  readonly kmsKeyCloudWatch: cdk.aws_kms.Key;
+  readonly kmsKeyCloudWatch?: cdk.aws_kms.IKey;
   /**
-   * Lambda environment variable encryption key
+   * Lambda environment variable encryption key, when undefined default AWS managed key will be used
    */
-  readonly kmsKeyLambda: cdk.aws_kms.Key;
+  readonly kmsKeyLambda?: cdk.aws_kms.IKey;
   /**
    * Lambda log retention in days
    */
@@ -66,6 +66,10 @@ export interface RevertScpChangesProps {
    * Single Account mode
    */
   readonly singleAccountMode: boolean;
+  /**
+   * Organization enabled
+   */
+  readonly organizationEnabled: boolean;
 }
 
 export class RevertScpChanges extends Construct {
@@ -128,6 +132,7 @@ export class RevertScpChanges extends Construct {
         HOME_REGION: props.homeRegion,
         SNS_TOPIC_ARN: snsTopicArn ?? '',
         SINGLE_ACCOUNT_MODE: `${props.singleAccountMode}`,
+        ORGANIZATIONS_ENABLED: `${props.organizationEnabled}`,
       },
       environmentEncryption: props.kmsKeyLambda,
       initialPolicy: revertScpChangesPolicyList,

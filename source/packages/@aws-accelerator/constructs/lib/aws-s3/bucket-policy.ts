@@ -59,17 +59,21 @@ export interface BucketPolicyProps {
    */
   readonly elbAccountId?: string;
   /**
-   * Custom resource lambda environment encryption key
+   * Custom resource lambda environment encryption key, when undefined default AWS managed key will be used
    */
-  readonly customResourceLambdaEnvironmentEncryptionKmsKey: cdk.aws_kms.IKey;
+  readonly customResourceLambdaEnvironmentEncryptionKmsKey?: cdk.aws_kms.IKey;
   /**
-   * Custom resource lambda log group encryption key
+   * Custom resource lambda log group encryption key, when undefined default AWS managed key will be used
    */
-  readonly customResourceLambdaCloudWatchLogKmsKey: cdk.aws_kms.IKey;
+  readonly customResourceLambdaCloudWatchLogKmsKey?: cdk.aws_kms.IKey;
   /**
    * Custom resource lambda log retention in days
    */
   readonly customResourceLambdaLogRetentionInDays: number;
+  /**
+   * Accelerator Prefix Firewall Roles
+   */
+  readonly firewallRoles?: string[];
 }
 
 /**
@@ -111,6 +115,7 @@ export class BucketPolicy extends Construct {
           { principalOrgIdCondition: props.principalOrgIdCondition },
           { organizationId: props.organizationId },
           { elbAccountId: props.elbAccountId },
+          { firewallRoles: props.firewallRoles },
         ],
         forceUpdate: true,
       },

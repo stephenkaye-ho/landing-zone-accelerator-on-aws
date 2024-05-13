@@ -36,9 +36,9 @@ export class CustomizationsStack extends AcceleratorStack {
   private stackSetAdministratorAccount: string;
 
   /**
-   * KMS Key used to encrypt CloudWatch logs
+   * KMS Key used to encrypt CloudWatch logs, when undefined default AWS managed key will be used
    */
-  private cloudwatchKey: cdk.aws_kms.Key;
+  private cloudwatchKey: cdk.aws_kms.IKey | undefined;
 
   /**
    * Constructor for CustomizationsStack

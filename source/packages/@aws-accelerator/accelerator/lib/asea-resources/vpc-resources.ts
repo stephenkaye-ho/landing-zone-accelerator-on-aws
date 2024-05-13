@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import { pascalCase } from 'pascal-case';
+import { IPv4CidrRange, IPv6CidrRange } from 'ip-num';
 
 import {
   CfnInternetGateway,
@@ -12,12 +13,7 @@ import {
   CfnVPNGateway,
 } from 'aws-cdk-lib/aws-ec2';
 
-import {
-  FirewallPolicyProperty,
-  NetworkFirewall,
-  NetworkFirewallPolicy,
-  NetworkFirewallRuleGroup,
-} from '@aws-accelerator/constructs';
+import { NetworkFirewall } from '@aws-accelerator/constructs';
 import { CfnInclude } from 'aws-cdk-lib/cloudformation-include';
 import {
   AseaStackInfo,
@@ -25,13 +21,17 @@ import {
   VpcTemplatesConfig,
   AseaResourceType,
   NfwFirewallConfig,
-  NfwStatefulRuleGroupReferenceConfig,
   RouteTableConfig,
   TransitGatewayAttachmentConfig,
+  SecurityGroupRuleConfig,
+  nonEmptyString,
+  NetworkConfigTypes,
 } from '@aws-accelerator/config';
 import { SsmResourceType } from '@aws-accelerator/utils';
 import { ImportAseaResourcesStack, LogLevel } from '../stacks/import-asea-resources-stack';
 import { AseaResource, AseaResourceProps } from './resource';
+import { getSubnetConfig, getVpcConfig } from '../stacks/network-stacks/utils/getter-utils';
+import { AcceleratorStage } from '../accelerator-stage';
 
 const enum RESOURCE_TYPE {
   VPC = 'AWS::EC2::VPC',
@@ -55,6 +55,30 @@ const enum RESOURCE_TYPE {
   VPC_ENDPOINT = 'AWS::EC2::VPCEndpoint',
   TRANSIT_GATEWAY_ROUTE_TABLE = 'AWS::EC2::TransitGatewayRouteTable',
 }
+
+type SecurityGroupRuleInfo = {
+  protocol: string;
+  source: string;
+  sourceValue: string;
+  type?: string;
+  to?: number;
+  from?: number;
+  sourceType?: string;
+  description?: string;
+};
+
+const TCP_PROTOCOLS_PORT: { [key: string]: number } = {
+  RDP: 3389,
+  SSH: 22,
+  HTTP: 80,
+  HTTPS: 443,
+  MSSQL: 1433,
+  'MYSQL/AURORA': 3306,
+  REDSHIFT: 5439,
+  POSTGRESQL: 5432,
+  'ORACLE-RDS': 1521,
+};
+
 const ASEA_PHASE_NUMBER = 1;
 
 type NestedAseaStackInfo = AseaStackInfo & { logicalResourceId: string };
@@ -93,9 +117,13 @@ export class VpcResources extends AseaResource {
       }
       const { stackInfo: vpcStackInfo, resource } = vpcResourceInfo;
       const nestedStack = this.stack.getNestedStack(vpcStackInfo.logicalResourceId);
+      const vpcPhysicalId = resource.physicalResourceId;
+      // This is retrieved the specific VPC resource is loaded so we can modify attributes
       const vpc = nestedStack.includedTemplate.getResource(resource.logicalResourceId) as CfnVPC;
+      this.addTagsToSharedEndpointVpcs(vpc, vpcPhysicalId, props);
       this.setupInternetGateway(vpcStackInfo, nestedStack, vpcInScope);
       this.setupVpnGateway(vpcStackInfo, nestedStack, vpcInScope);
+      // This modifies ASEA vpc attributes to match LZA config
       vpc.cidrBlock = vpcInScope.cidrs![0]; // 0th index is always main cidr Block
       vpc.enableDnsHostnames = vpcInScope.enableDnsHostnames;
       vpc.enableDnsSupport = vpcInScope.enableDnsSupport;
@@ -123,6 +151,7 @@ export class VpcResources extends AseaResource {
           .filter(cidr => !existingAdditionalCidrBlocks.includes(cidr));
         this.scope.addLogs(LogLevel.INFO, `Removed Additional CIDR created by ASEA are ${removedAseaCidrs}`);
       }
+      // Create Subnets takes in an LZA VPC Config as 'vpcInScope' object and Existing ASEA stack resource information as 'vpcStackInfo'
       const subnets = this.createSubnets(vpcInScope, vpcStackInfo, nestedStack.includedTemplate);
       this.createNatGateways(vpcStackInfo, nestedStack.includedTemplate, vpcInScope, subnets);
       this.createSecurityGroups(vpcInScope, vpcStackInfo, nestedStack.includedTemplate);
@@ -196,6 +225,54 @@ export class VpcResources extends AseaResource {
       // Increment index
       index += 1;
     }
+  }
+
+  private getVPCId(vpcName: string) {
+    if (!this.props.globalConfig.externalLandingZoneResources?.templateMap) {
+      return;
+    }
+    const vpcStacksInfo = this.props.globalConfig.externalLandingZoneResources.templateMap.filter(
+      stack =>
+        stack.accountKey === this.stackInfo.accountKey &&
+        stack.phase === 1 &&
+        stack.region === this.stackInfo.region &&
+        stack.nestedStack,
+    );
+    let vpcId: string | undefined;
+    for (const vpcStackInfo of vpcStacksInfo) {
+      const vpcResource = this.findResourceByTypeAndTag(vpcStackInfo.resources, RESOURCE_TYPE.VPC, vpcName);
+      if (vpcResource) {
+        vpcId = vpcResource.physicalResourceId;
+        break;
+      }
+    }
+    return vpcId;
+  }
+
+  private addTagsToSharedEndpointVpcs(currentVpc: cdk.aws_ec2.CfnVPC, vpcPhysicalId: string, props: VpcResourcesProps) {
+    const vpcs = props.networkConfig.vpcs;
+    const centralEndpointAccount = this.getCentralEndpointAccount(vpcs);
+    const accountsConfig = props.accountsConfig;
+    for (const vpc of vpcs) {
+      const vpcTemplateId = this.getVPCId(vpc.name);
+      if (vpcPhysicalId === vpcTemplateId && vpc.useCentralEndpoints && centralEndpointAccount) {
+        cdk.Tags.of(currentVpc).add('accelerator:use-central-endpoints', 'true');
+        cdk.Tags.of(currentVpc).add(
+          'accelerator:central-endpoints-account-id',
+          accountsConfig.getAccountId(centralEndpointAccount!),
+        );
+      }
+    }
+  }
+
+  private getCentralEndpointAccount(vpcTemplates: VpcConfig[]) {
+    let centralEndpointAccount;
+    for (const vpcTemplate of vpcTemplates) {
+      if (vpcTemplate.interfaceEndpoints?.central && vpcTemplate.account) {
+        centralEndpointAccount = vpcTemplate.account!;
+      }
+    }
+    return centralEndpointAccount;
   }
 
   private setupInternetGateway(
@@ -306,102 +383,8 @@ export class VpcResources extends AseaResource {
     vpcStack: CfnInclude,
   ) {
     const securityGroupsMap = new Map<string, string>();
-    /**
-     * Uncomment following code to handle SecurityGroup Rules
-     */
-    // type SecurityGroupRuleInfo = {
-    //   protocol: string;
-    //   source: string;
-    //   sourceValue: string;
-    //   type?: string;
-    //   to?: number;
-    //   from?: number;
-    // };
-    // const processSecurityGroupSources = (
-    //   securityGroupRuleItem: SecurityGroupRuleConfig,
-    //   ruleProps: {
-    //     protocol: cdk.aws_ec2.Protocol;
-    //     type?: string;
-    //     from?: number;
-    //     to?: number;
-    //   },
-    // ) => {
-    //   const securityGroupRules: SecurityGroupRuleInfo[] = [];
-    //   securityGroupRuleItem.sources.forEach(sourceItem => {
-    //     if (nonEmptyString.is(sourceItem))
-    //       securityGroupRules.push({
-    //         ...ruleProps,
-    //         source: sourceItem,
-    //         sourceValue: sourceItem,
-    //       });
-    //     if (NetworkConfigTypes.subnetSourceConfig.is(sourceItem)) {
-    //       const sourceVpcItem = getVpcConfig(this.vpcResources, sourceItem.vpc);
-    //       sourceItem.subnets.forEach(subnet =>
-    //         securityGroupRules.push({
-    //           ...ruleProps,
-    //           source: `${sourceVpcItem.name}/${subnet}`,
-    //           sourceValue: getSubnetConfig(sourceVpcItem, subnet).ipv4CidrBlock!,
-    //         }),
-    //       );
-    //     }
-    //     if (NetworkConfigTypes.securityGroupSourceConfig.is(sourceItem)) {
-    //       sourceItem.securityGroups.forEach(securityGroup => {
-    //         if (!securityGroupsMap.get(securityGroup)) return;
-    //         securityGroupRules.push({
-    //           ...ruleProps,
-    //           source: securityGroup,
-    //           sourceValue: securityGroupsMap.get(securityGroup)!,
-    //         });
-    //       });
-    //     }
-    //   });
-    //   return securityGroupRules;
-    // };
-    // const processTcpSources = (securityGroupRuleItem: SecurityGroupRuleConfig) => {
-    //   const securityGroupRules: SecurityGroupRuleInfo[] = [];
-    //   for (const tcpPort of securityGroupRuleItem.tcpPorts ?? []) {
-    //     const defaultRuleProps = {
-    //       protocol: cdk.aws_ec2.Protocol.TCP,
-    //       from: tcpPort,
-    //       to: tcpPort,
-    //     };
-    //     securityGroupRules.push(...processSecurityGroupSources(securityGroupRuleItem, defaultRuleProps));
-    //   }
-    //   return securityGroupRules;
-    // };
-    // const processUdpSources = (securityGroupRuleItem: SecurityGroupRuleConfig) => {
-    //   const securityGroupRules: SecurityGroupRuleInfo[] = [];
-    //   for (const tcpPort of securityGroupRuleItem.udpPorts ?? []) {
-    //     const defaultRuleProps = {
-    //       protocol: cdk.aws_ec2.Protocol.UDP,
-    //       from: tcpPort,
-    //       to: tcpPort,
-    //     };
-    //     securityGroupRules.push(...processSecurityGroupSources(securityGroupRuleItem, defaultRuleProps));
-    //   }
-    //   return securityGroupRules;
-    // };
-    // const processTypeSources = (securityGroupRuleItem: SecurityGroupRuleConfig) => {
-    //   const securityGroupRules: SecurityGroupRuleInfo[] = [];
-    //   for (const ruleType of securityGroupRuleItem.types ?? []) {
-    //     if (ruleType === 'ALL') {
-    //       const defaultRuleProps = {
-    //         protocol: cdk.aws_ec2.Protocol.ALL,
-    //         type: ruleType,
-    //       };
-    //       securityGroupRules.push(...processSecurityGroupSources(securityGroupRuleItem, defaultRuleProps));
-    //     } else {
-    //       const defaultRuleProps = {
-    //         protocol: cdk.aws_ec2.Protocol.TCP,
-    //         type: ruleType,
-    //         from: TCP_PROTOCOLS_PORT[ruleType],
-    //         to: TCP_PROTOCOLS_PORT[ruleType],
-    //       };
-    //       securityGroupRules.push(...processSecurityGroupSources(securityGroupRuleItem, defaultRuleProps));
-    //     }
-    //   }
-    //   return securityGroupRules;
-    // };
+    const securityGroupPhysicalIdMap = new Map<string, string>();
+    const securityGroupVpc = vpcItem.name;
     for (const securityGroupItem of vpcItem.securityGroups ?? []) {
       const existingSecurityGroup = this.findResourceByName(
         vpcStackInfo.resources,
@@ -410,6 +393,10 @@ export class VpcResources extends AseaResource {
       );
       if (!existingSecurityGroup) continue;
       const securityGroup = vpcStack.getResource(existingSecurityGroup.logicalResourceId) as CfnSecurityGroup;
+      this.scope.addLogs(
+        LogLevel.INFO,
+        `Adding SSM Parameter for ${pascalCase(vpcItem.name) + pascalCase(securityGroupItem.name)}SecurityGroup`,
+      );
       this.addSsmParameter({
         logicalId: pascalCase(`SsmParam${pascalCase(vpcItem.name) + pascalCase(securityGroupItem.name)}SecurityGroup`),
         parameterName: this.scope.getSsmPath(SsmResourceType.SECURITY_GROUP, [vpcItem.name, securityGroupItem.name]),
@@ -417,94 +404,429 @@ export class VpcResources extends AseaResource {
       });
       this.scope.addAseaResource(AseaResourceType.EC2_SECURITY_GROUP, `${vpcItem.name}/${securityGroupItem.name}`);
       securityGroupsMap.set(securityGroupItem.name, existingSecurityGroup.logicalResourceId);
+      securityGroupPhysicalIdMap.set(securityGroupItem.name, existingSecurityGroup.physicalResourceId);
     }
-    /**
-     * Uncomment following code to handle SecurityGroup Rules
-     */
-    // for (const securityGroupItem of vpcItem.securityGroups ?? []) {
-    //   const logicalId = securityGroupsMap.get(securityGroupItem.name);
-    //   if (!logicalId) continue;
-    //   const securityGroupIngressRules: SecurityGroupRuleInfo[] = [];
-    //   const securityGroupEgressRules: SecurityGroupRuleInfo[] = [];
-    //   const egressRules = this.filterResourcesByRef(
-    //     this.filterResourcesByType(vpcStackInfo.resources, RESOURCE_TYPE.SECURITY_GROUP_EGRESS),
-    //     'GroupId',
-    //     logicalId,
-    //   );
-    //   const ingressRules = this.filterResourcesByRef(
-    //     this.filterResourcesByType(vpcStackInfo.resources, RESOURCE_TYPE.SECURITY_GROUP_INGRESS),
-    //     'GroupId',
-    //     logicalId,
-    //   );
-    //   for (const ingressRuleItem of securityGroupItem.inboundRules) {
-    //     securityGroupIngressRules.push(
-    //       ...processTcpSources(ingressRuleItem),
-    //       ...processUdpSources(ingressRuleItem),
-    //       ...processTypeSources(ingressRuleItem),
-    //     );
-    //   }
-    //   for (const egressRuleItem of securityGroupItem.outboundRules) {
-    //     securityGroupEgressRules.push(
-    //       ...processTcpSources(egressRuleItem),
-    //       ...processUdpSources(egressRuleItem),
-    //       ...processTypeSources(egressRuleItem),
-    //     );
-    //     securityGroupIngressRules.forEach(configIngressRule => {
-    //       const existingIngressRuleEntry = ingressRules.find(
-    //         existingIngressRule =>
-    //           ((existingIngressRule.resourceMetadata['Properties'].IpProtocol &&
-    //             existingIngressRule.resourceMetadata['Properties'].IpProtocol === configIngressRule.protocol) ||
-    //             true) &&
-    //           ((existingIngressRule.resourceMetadata['Properties'].FromPort &&
-    //             existingIngressRule.resourceMetadata['Properties'].FromPort === configIngressRule.from) ||
-    //             true) &&
-    //           ((existingIngressRule.resourceMetadata['Properties'].ToPort &&
-    //             existingIngressRule.resourceMetadata['Properties'].ToPort === configIngressRule.to) ||
-    //             true) &&
-    //           ((existingIngressRule.resourceMetadata['Properties'].CidrIp &&
-    //             existingIngressRule.resourceMetadata['Properties'].CidrIp === configIngressRule.sourceValue) ||
-    //             true) &&
-    //           ((existingIngressRule.resourceMetadata['Properties'].SourceSecurityGroupId &&
-    //             existingIngressRule.resourceMetadata['Properties'].SourceSecurityGroupId.Ref ===
-    //               configIngressRule.sourceValue) ||
-    //             true),
-    //       );
-    //       // Updated to existing ingress is not handled here.
-    //       if (existingIngressRuleEntry)
-    //         this.scope.addAseaResource(
-    //           AseaResourceType.EC2_SECURITY_GROUP_INGRESS,
-    //           `${vpcItem.name}/${securityGroupItem.name}/ingress/${configIngressRule.source}-${configIngressRule.from}-${configIngressRule.to}-${configIngressRule.protocol}`,
-    //         );
-    //     });
-    //     securityGroupEgressRules.forEach(configEgressRule => {
-    //       const existingEgressRuleEntry = egressRules.find(
-    //         existingEgressRule =>
-    //           ((existingEgressRule.resourceMetadata['Properties'].IpProtocol &&
-    //             existingEgressRule.resourceMetadata['Properties'].IpProtocol === configEgressRule.protocol) ||
-    //             true) &&
-    //           ((existingEgressRule.resourceMetadata['Properties'].FromPort &&
-    //             existingEgressRule.resourceMetadata['Properties'].FromPort === configEgressRule.from) ||
-    //             true) &&
-    //           ((existingEgressRule.resourceMetadata['Properties'].ToPort &&
-    //             existingEgressRule.resourceMetadata['Properties'].ToPort === configEgressRule.to) ||
-    //             true) &&
-    //           ((existingEgressRule.resourceMetadata['Properties'].CidrIp &&
-    //             existingEgressRule.resourceMetadata['Properties'].CidrIp === configEgressRule.sourceValue) ||
-    //             true) &&
-    //           ((existingEgressRule.resourceMetadata['Properties'].SourceSecurityGroupId &&
-    //             existingEgressRule.resourceMetadata['Properties'].SourceSecurityGroupId.Ref ===
-    //               configEgressRule.sourceValue) ||
-    //             true),
-    //       );
-    //       // Updated to existing egress is not handled here.
-    //       if (existingEgressRuleEntry)
-    //         this.scope.addAseaResource(
-    //           AseaResourceType.EC2_SECURITY_GROUP_EGRESS,
-    //           `${vpcItem.name}/${securityGroupItem.name}/egress/${configEgressRule.source}-${configEgressRule.from}-${configEgressRule.to}-${configEgressRule.protocol}`,
-    //         );
-    //     });
-    //   }
-    // }
+
+    for (const securityGroupItem of vpcItem.securityGroups ?? []) {
+      const logicalId = securityGroupsMap.get(securityGroupItem.name);
+      if (!logicalId) continue;
+      let securityGroupIngressRules: SecurityGroupRuleInfo[] = [];
+      let securityGroupEgressRules: SecurityGroupRuleInfo[] = [];
+      securityGroupIngressRules = this.processSecurityGroupIngressSources(
+        securityGroupItem.inboundRules,
+        securityGroupIngressRules,
+        securityGroupsMap,
+        securityGroupVpc,
+      );
+      securityGroupEgressRules = this.processSecurityGroupEgressSources(
+        securityGroupItem.outboundRules,
+        securityGroupEgressRules,
+        securityGroupsMap,
+        securityGroupVpc,
+      );
+
+      const securityGroup = vpcStack.getResource(logicalId) as CfnSecurityGroup;
+      this.updateSecurityGroupIngressRules(
+        securityGroupIngressRules,
+        securityGroupPhysicalIdMap,
+        securityGroup,
+        securityGroupVpc,
+      );
+      this.updateSecurityGroupEgressRules(
+        securityGroupEgressRules,
+        securityGroupPhysicalIdMap,
+        securityGroup,
+        securityGroupVpc,
+      );
+    }
+  }
+
+  private processSecurityGroupSources = (
+    securityGroupRuleItem: SecurityGroupRuleConfig,
+    ruleProps: {
+      protocol: cdk.aws_ec2.Protocol;
+      type?: string;
+      from?: number;
+      to?: number;
+    },
+    securityGroupsMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) => {
+    const securityGroupRules: SecurityGroupRuleInfo[] = [];
+    securityGroupRuleItem.sources.forEach(sourceItem => {
+      if (nonEmptyString.is(sourceItem)) {
+        securityGroupRules.push({
+          ...ruleProps,
+          source: sourceItem,
+          sourceValue: sourceItem,
+          description: securityGroupRuleItem.description,
+        });
+      }
+      if (NetworkConfigTypes.subnetSourceConfig.is(sourceItem)) {
+        const sourceVpcItem = getVpcConfig(this.scope.vpcsInScope, sourceItem.vpc);
+        sourceItem.subnets.forEach(subnet =>
+          securityGroupRules.push({
+            ...ruleProps,
+            source: `${sourceVpcItem.name}/${subnet}`,
+            sourceValue: getSubnetConfig(sourceVpcItem, subnet).ipv4CidrBlock!,
+            sourceType: 'subnet',
+            description: securityGroupRuleItem.description,
+          }),
+        );
+      }
+      if (NetworkConfigTypes.securityGroupSourceConfig.is(sourceItem)) {
+        sourceItem.securityGroups.forEach(securityGroup => {
+          const securityGroupId = this.getSecurityGroupId(securityGroupsMap, securityGroup, securityGroupVpc);
+          if (!securityGroupId) return;
+          //We do not currently account for cross account or cross vpc sgs, this is not natively supported in LZA.
+          securityGroupRules.push({
+            ...ruleProps,
+            source: securityGroup,
+            sourceValue: securityGroupsMap.get(securityGroup) ?? securityGroupId,
+            sourceType: 'sg',
+            description: securityGroupRuleItem.description,
+          });
+        });
+      }
+    });
+    return securityGroupRules;
+  };
+
+  private getSecurityGroupId(securityGroupsMap: Map<string, string>, securityGroup: string, securityGroupVpc: string) {
+    let securityGroupId = undefined;
+    const securityGroupFromSSMParam = this.scope.getExternalResourceParameter(
+      this.scope.getSsmPath(SsmResourceType.SECURITY_GROUP, [securityGroupVpc, securityGroup]),
+    );
+    // This sets SG if securityGroup exists in ASEA SGs
+    if (securityGroupsMap.get(securityGroup)) {
+      securityGroupId = securityGroupsMap.get(securityGroup);
+    } else if (securityGroupFromSSMParam) {
+      // This sets SG equal to value if securityGroup exists as a security Group created by LZA
+      securityGroupId = securityGroupFromSSMParam;
+    } else {
+      if (!securityGroupId && this.props.stage === AcceleratorStage.POST_IMPORT_ASEA_RESOURCES) {
+        throw new Error(
+          `Security Group Source ${securityGroup} was not found in ASEA SecurityGroup Map or in SSM Parameter path for ${this.scope.getSsmPath(
+            SsmResourceType.SECURITY_GROUP,
+            [securityGroupVpc, securityGroup],
+          )}`,
+        );
+      }
+    }
+    return securityGroupId;
+  }
+
+  private processSecurityGroupIngressSources(
+    securityGroupRuleIngressItems: SecurityGroupRuleConfig[],
+    securityGroupIngressRules: SecurityGroupRuleInfo[],
+    securityGroupsMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) {
+    for (const ingressRuleItem of securityGroupRuleIngressItems) {
+      securityGroupIngressRules.push(
+        ...this.processTcpSources(ingressRuleItem, securityGroupsMap, securityGroupVpc),
+        ...this.processUdpSources(ingressRuleItem, securityGroupsMap, securityGroupVpc),
+        ...this.processTypeSources(ingressRuleItem, securityGroupsMap, securityGroupVpc),
+      );
+    }
+    return securityGroupIngressRules;
+  }
+
+  private processSecurityGroupEgressSources(
+    securityGroupRuleEgressItems: SecurityGroupRuleConfig[],
+    securityGroupEgressRules: SecurityGroupRuleInfo[],
+    securityGroupsMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) {
+    for (const egressRuleItem of securityGroupRuleEgressItems) {
+      securityGroupEgressRules.push(
+        ...this.processTcpSources(egressRuleItem, securityGroupsMap, securityGroupVpc),
+        ...this.processUdpSources(egressRuleItem, securityGroupsMap, securityGroupVpc),
+        ...this.processTypeSources(egressRuleItem, securityGroupsMap, securityGroupVpc),
+      );
+    }
+    return securityGroupEgressRules;
+  }
+
+  private processTypeSources = (
+    securityGroupRuleItem: SecurityGroupRuleConfig,
+    securityGroupsMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) => {
+    const securityGroupRules: SecurityGroupRuleInfo[] = [];
+    for (const ruleType of securityGroupRuleItem.types ?? []) {
+      if (ruleType === 'ALL') {
+        const defaultRuleProps = {
+          protocol: cdk.aws_ec2.Protocol.ALL,
+          type: ruleType,
+        };
+        securityGroupRules.push(
+          ...this.processSecurityGroupSources(
+            securityGroupRuleItem,
+            defaultRuleProps,
+            securityGroupsMap,
+            securityGroupVpc,
+          ),
+        );
+      } else {
+        const defaultRuleProps = {
+          protocol: cdk.aws_ec2.Protocol.TCP,
+          type: ruleType,
+          from: TCP_PROTOCOLS_PORT[ruleType],
+          to: TCP_PROTOCOLS_PORT[ruleType],
+        };
+        securityGroupRules.push(
+          ...this.processSecurityGroupSources(
+            securityGroupRuleItem,
+            defaultRuleProps,
+            securityGroupsMap,
+            securityGroupVpc,
+          ),
+        );
+      }
+    }
+    return securityGroupRules;
+  };
+
+  private processUdpSources = (
+    securityGroupRuleItem: SecurityGroupRuleConfig,
+    securityGroupsMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) => {
+    const securityGroupRules: SecurityGroupRuleInfo[] = [];
+    for (const tcpPort of securityGroupRuleItem.udpPorts ?? []) {
+      const defaultRuleProps = {
+        protocol: cdk.aws_ec2.Protocol.UDP,
+        from: tcpPort,
+        to: tcpPort,
+      };
+      securityGroupRules.push(
+        ...this.processSecurityGroupSources(
+          securityGroupRuleItem,
+          defaultRuleProps,
+          securityGroupsMap,
+          securityGroupVpc,
+        ),
+      );
+    }
+    return securityGroupRules;
+  };
+
+  private processTcpSources = (
+    securityGroupRuleItem: SecurityGroupRuleConfig,
+    securityGroupsMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) => {
+    const securityGroupRules: SecurityGroupRuleInfo[] = [];
+    for (const tcpPort of securityGroupRuleItem.tcpPorts ?? []) {
+      const defaultRuleProps = {
+        protocol: cdk.aws_ec2.Protocol.TCP,
+        from: tcpPort,
+        to: tcpPort,
+      };
+      securityGroupRules.push(
+        ...this.processSecurityGroupSources(
+          securityGroupRuleItem,
+          defaultRuleProps,
+          securityGroupsMap,
+          securityGroupVpc,
+        ),
+      );
+    }
+    return securityGroupRules;
+  };
+
+  private updateSecurityGroupIngressRules(
+    securityGroupLzaConfigIngressRules: SecurityGroupRuleInfo[],
+    securityGroupPhysicalIdMap: Map<string, string>,
+    securityGroup: cdk.aws_ec2.CfnSecurityGroup,
+    securityGroupVpc: string,
+  ) {
+    let existingIngressRulesToBeUpdated: CfnSecurityGroup.IngressProperty[] = [];
+    existingIngressRulesToBeUpdated = this.mapConfigRulesToIngressProperties(
+      securityGroupLzaConfigIngressRules,
+      securityGroupPhysicalIdMap,
+      securityGroupVpc,
+    );
+
+    if (existingIngressRulesToBeUpdated && existingIngressRulesToBeUpdated.length > 0) {
+      this.scope.addLogs(LogLevel.INFO, `'Updating Ingress rules on Security Group ${securityGroup.groupName}`);
+      this.scope.addLogs(LogLevel.INFO, `Pushing on rule(s): ${existingIngressRulesToBeUpdated}`);
+      if (securityGroup) {
+        securityGroup.securityGroupIngress = existingIngressRulesToBeUpdated;
+      }
+    }
+    return securityGroup;
+  }
+
+  private updateSecurityGroupEgressRules(
+    securityGroupLzaConfigEgressRules: SecurityGroupRuleInfo[],
+    securityGroupPhysicalIdMap: Map<string, string>,
+    securityGroup: cdk.aws_ec2.CfnSecurityGroup,
+    securityGroupVpc: string,
+  ) {
+    let existingEgressRulesToBeUpdated: CfnSecurityGroup.EgressProperty[] = [];
+    existingEgressRulesToBeUpdated = this.mapConfigRulesToEgressProperties(
+      securityGroupLzaConfigEgressRules,
+      securityGroupPhysicalIdMap,
+      securityGroupVpc,
+    );
+
+    if (existingEgressRulesToBeUpdated && existingEgressRulesToBeUpdated.length > 0) {
+      this.scope.addLogs(LogLevel.INFO, `Updating Egress rules on SG: ${securityGroup.groupName}`);
+      this.scope.addLogs(LogLevel.INFO, `Pushing on rule(s) ${existingEgressRulesToBeUpdated}`);
+      if (securityGroup) {
+        securityGroup.securityGroupEgress = existingEgressRulesToBeUpdated;
+      }
+    }
+    return securityGroup;
+  }
+
+  private mapConfigRulesToEgressProperties(
+    securityGroupLzaConfigRules: SecurityGroupRuleInfo[],
+    securityGroupPhysicalIdMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) {
+    const existingEgressRulesToBeUpdated: CfnSecurityGroup.IngressProperty[] = [];
+    securityGroupLzaConfigRules.forEach(configEgressRule => {
+      if (configEgressRule.sourceType === 'sg') {
+        const securityGroupId = this.getSecurityGroupId(
+          securityGroupPhysicalIdMap,
+          configEgressRule.source,
+          securityGroupVpc,
+        );
+        const existingEgressRuleToBeUpdated: CfnSecurityGroup.EgressProperty = {
+          ipProtocol: configEgressRule.protocol,
+          description: configEgressRule.description,
+          destinationSecurityGroupId: securityGroupId,
+          fromPort: configEgressRule.from,
+          toPort: configEgressRule.to,
+        };
+        existingEgressRulesToBeUpdated.push(existingEgressRuleToBeUpdated);
+      }
+
+      if (configEgressRule.sourceType === 'pl') {
+        const existingEgressRuleToBeUpdated: CfnSecurityGroup.EgressProperty = {
+          ipProtocol: configEgressRule.protocol,
+          description: configEgressRule.description,
+          destinationPrefixListId: configEgressRule.source,
+        };
+        existingEgressRulesToBeUpdated.push(existingEgressRuleToBeUpdated);
+      }
+      if (configEgressRule.sourceType === 'subnet') {
+        const existingEgressRuleToBeUpdated: CfnSecurityGroup.EgressProperty = {
+          ipProtocol: configEgressRule.protocol,
+          description: configEgressRule.description,
+          cidrIp: configEgressRule.sourceValue,
+          fromPort: configEgressRule.from,
+          toPort: configEgressRule.to,
+        };
+        existingEgressRulesToBeUpdated.push(existingEgressRuleToBeUpdated);
+      }
+      const sourceCidrType = this.checkCidrFromSource(configEgressRule.source);
+
+      if (sourceCidrType === 'cidrIpv4') {
+        const existingEgressRuleToBeUpdated: CfnSecurityGroup.EgressProperty = {
+          ipProtocol: configEgressRule.protocol,
+          description: configEgressRule.description,
+          cidrIp: configEgressRule.source,
+          fromPort: configEgressRule.from,
+          toPort: configEgressRule.to,
+        };
+        existingEgressRulesToBeUpdated.push(existingEgressRuleToBeUpdated);
+      }
+
+      if (sourceCidrType === 'cidrIpv6') {
+        const existingEgressRuleToBeUpdated: CfnSecurityGroup.EgressProperty = {
+          ipProtocol: configEgressRule.protocol,
+          description: configEgressRule.description,
+          cidrIpv6: configEgressRule.source,
+          fromPort: configEgressRule.from,
+          toPort: configEgressRule.to,
+        };
+        existingEgressRulesToBeUpdated.push(existingEgressRuleToBeUpdated);
+      }
+    });
+    return existingEgressRulesToBeUpdated;
+  }
+
+  private mapConfigRulesToIngressProperties(
+    securityGroupLzaConfigIngressRules: SecurityGroupRuleInfo[],
+    securityGroupPhysicalIdMap: Map<string, string>,
+    securityGroupVpc: string,
+  ) {
+    const existingIngressRulesToBeUpdated: CfnSecurityGroup.IngressProperty[] = [];
+    securityGroupLzaConfigIngressRules.forEach(configIngressRule => {
+      if (configIngressRule.sourceType === 'sg') {
+        const securityGroupId = this.getSecurityGroupId(
+          securityGroupPhysicalIdMap,
+          configIngressRule.source,
+          securityGroupVpc,
+        );
+        const existingIngressRuleToBeUpdated: CfnSecurityGroup.IngressProperty = {
+          ipProtocol: configIngressRule.protocol,
+          description: configIngressRule.description,
+          sourceSecurityGroupId: securityGroupId,
+          fromPort: configIngressRule.from,
+          toPort: configIngressRule.to,
+        };
+        existingIngressRulesToBeUpdated.push(existingIngressRuleToBeUpdated);
+      }
+
+      if (configIngressRule.sourceType === 'pl') {
+        const existingIngressRuleToBeUpdated: CfnSecurityGroup.IngressProperty = {
+          ipProtocol: configIngressRule.protocol,
+          description: configIngressRule.description,
+          sourcePrefixListId: configIngressRule.source,
+        };
+        existingIngressRulesToBeUpdated.push(existingIngressRuleToBeUpdated);
+      }
+      if (configIngressRule.sourceType === 'subnet') {
+        const existingIngressRuleToBeUpdated: CfnSecurityGroup.IngressProperty = {
+          ipProtocol: configIngressRule.protocol,
+          description: configIngressRule.description,
+          cidrIp: configIngressRule.sourceValue,
+          fromPort: configIngressRule.from,
+          toPort: configIngressRule.to,
+        };
+        existingIngressRulesToBeUpdated.push(existingIngressRuleToBeUpdated);
+      }
+      const sourceCidrType = this.checkCidrFromSource(configIngressRule.source);
+
+      if (sourceCidrType === 'cidrIpv4') {
+        const existingIngressRuleToBeUpdated: CfnSecurityGroup.IngressProperty = {
+          ipProtocol: configIngressRule.protocol,
+          description: configIngressRule.description,
+          cidrIp: configIngressRule.source,
+          fromPort: configIngressRule.from,
+          toPort: configIngressRule.to,
+        };
+        existingIngressRulesToBeUpdated.push(existingIngressRuleToBeUpdated);
+      }
+
+      if (sourceCidrType === 'cidrIpv6') {
+        const existingIngressRuleToBeUpdated: CfnSecurityGroup.IngressProperty = {
+          ipProtocol: configIngressRule.protocol,
+          description: configIngressRule.description,
+          cidrIpv6: configIngressRule.source,
+          fromPort: configIngressRule.from,
+          toPort: configIngressRule.to,
+        };
+        existingIngressRulesToBeUpdated.push(existingIngressRuleToBeUpdated);
+      }
+    });
+    return existingIngressRulesToBeUpdated;
+  }
+
+  private checkCidrFromSource(source: string) {
+    let sourceType;
+    if (this.isValidIpv4Cidr(source)) {
+      sourceType = 'cidrIpv4';
+    }
+    if (this.isValidIpv6Cidr(source)) {
+      sourceType = 'cidrIpv6';
+    }
+    return sourceType;
   }
 
   private createTransitGatewayAttachments(
@@ -714,8 +1036,7 @@ export class VpcResources extends AseaResource {
     return stackInfo.resources.filter(cfnResource => cfnResource.resourceType === RESOURCE_TYPE.CIDR_BLOCK);
   }
 
-  private createNetworkFirewallRuleGroups(vpcStackInfo: NestedAseaStackInfo, vpcStack: CfnInclude) {
-    const ruleGroupMap = new Map<string, string>();
+  private deleteAseaNetworkFirewallRuleGroups(vpcStackInfo: NestedAseaStackInfo, vpcStack: CfnInclude) {
     const networkFirewallConfig = this.props.networkConfig.centralNetworkServices?.networkFirewall;
     const firewallRuleGroupResources = this.filterResourcesByType(
       vpcStackInfo.resources,
@@ -729,97 +1050,26 @@ export class VpcResources extends AseaResource {
       const ruleItem = networkFirewallConfig?.rules.find(group => group.name === aseaManagedRuleGroupName);
       if (!ruleItem) {
         this.scope.addLogs(
-          LogLevel.WARN,
+          LogLevel.INFO,
           `No Firewall Rule Group found in configuration and firewall policy present in resource mapping`,
         );
         continue;
       }
-      const rule = NetworkFirewallRuleGroup.includedCfnResource(
-        vpcStack,
-        firewallRuleGroupResource.logicalResourceId,
-        ruleItem,
-      );
-      ruleGroupMap.set(ruleItem.name, rule.ref);
-      this.addSsmParameter({
-        logicalId: pascalCase(`SsmParam${ruleItem.name}NetworkFirewallRuleGroup`),
-        parameterName: this.scope.getSsmPath(SsmResourceType.NFW_RULE_GROUP, [ruleItem.name]),
-        stringValue: rule.ref,
-      });
-      this.scope.addAseaResource(AseaResourceType.NFW_RULE_GROUP, ruleItem.name);
+
+      this.scope.addLogs(LogLevel.INFO, `Removing NFW Rule Group: ${firewallRuleGroupResource.logicalResourceId}`);
+      vpcStack.node.tryRemoveChild(firewallRuleGroupResource.logicalResourceId);
     }
-    return ruleGroupMap;
   }
 
-  private getRuleGroupReferences<T>(
-    ruleGroupReferences: NfwStatefulRuleGroupReferenceConfig[],
-    ruleGroupMap?: Map<string, string>,
-  ): T[] {
-    const references: T[] = [];
-
-    for (const reference of ruleGroupReferences) {
-      let groupArn = !!ruleGroupMap && ruleGroupMap.get(reference.name);
-      if (!groupArn) {
-        groupArn = this.scope.getSsmPath(SsmResourceType.NFW_RULE_GROUP, [reference.name]);
-      }
-      if (groupArn) references.push({ resourceArn: groupArn, priority: reference.priority } as T);
-    }
-    return references;
-  }
-
-  private createNetworkFirewallPolicy(
-    vpcStackInfo: NestedAseaStackInfo,
-    vpcStack: CfnInclude,
-    ruleGroupsMap?: Map<string, string>,
-  ) {
-    const networkFirewallConfig = this.props.networkConfig.centralNetworkServices?.networkFirewall;
+  private deleteAseaNetworkFirewallPolicy(vpcStackInfo: NestedAseaStackInfo, vpcStack: CfnInclude) {
     const firewallResources = this.filterResourcesByType(vpcStackInfo.resources, RESOURCE_TYPE.NETWORK_FIREWALL_POLICY);
     if (firewallResources.length === 0) {
       return;
     }
     const aseaManagedPolicy = firewallResources[0];
-    const aseaManagedPolicyName: string = aseaManagedPolicy.resourceMetadata['Properties'].FirewallPolicyName;
-    const policyItem = networkFirewallConfig?.policies.find(policy => policy.name === aseaManagedPolicyName);
-    if (!policyItem) {
-      this.scope.addLogs(
-        LogLevel.WARN,
-        `No Firewall Policy found in configuration and firewall policy present in resource mapping`,
-      );
-      return;
-    }
-    const firewallPolicy: FirewallPolicyProperty = {
-      statelessDefaultActions: policyItem.firewallPolicy.statelessDefaultActions,
-      statelessFragmentDefaultActions: policyItem.firewallPolicy.statelessFragmentDefaultActions,
-      statefulDefaultActions: policyItem.firewallPolicy.statefulDefaultActions,
-      statefulEngineOptions: policyItem.firewallPolicy.statefulEngineOptions,
-      statefulRuleGroupReferences: policyItem.firewallPolicy.statefulRuleGroups
-        ? this.getRuleGroupReferences<{ resourceArn: string; priority?: number }>(
-            policyItem.firewallPolicy.statefulRuleGroups,
-            ruleGroupsMap,
-          )
-        : [],
-      statelessCustomActions: policyItem.firewallPolicy.statelessCustomActions,
-      statelessRuleGroupReferences: policyItem.firewallPolicy.statelessRuleGroups
-        ? this.getRuleGroupReferences<{ resourceArn: string; priority: number }>(
-            policyItem.firewallPolicy.statelessRuleGroups,
-            ruleGroupsMap,
-          )
-        : [],
-    };
-    const policy = NetworkFirewallPolicy.includedCfnResource(vpcStack, aseaManagedPolicy.logicalResourceId, {
-      description: policyItem.description,
-      name: policyItem.name,
-      firewallPolicy,
-    });
-    this.addSsmParameter({
-      logicalId: pascalCase(`SsmParam${policyItem.name}NetworkFirewallPolicy`),
-      parameterName: this.scope.getSsmPath(SsmResourceType.NFW_POLICY, [policyItem.name]),
-      stringValue: policy.ref,
-    });
-    this.scope.addAseaResource(AseaResourceType.NFW_POLICY, policyItem.name);
-    return {
-      name: policyItem.name,
-      arn: policy.ref,
-    };
+
+    this.scope.addLogs(LogLevel.INFO, `Removing NFW Policy: ${aseaManagedPolicy.logicalResourceId}`);
+    vpcStack.node.tryRemoveChild(aseaManagedPolicy.logicalResourceId);
   }
 
   private addFirewallLoggingConfiguration(
@@ -871,28 +1121,46 @@ export class VpcResources extends AseaResource {
       logDestinationConfigs: destinationConfigs,
     };
   }
+
   private createNetworkFirewall(
     vpcItem: VpcConfig | VpcTemplatesConfig,
     vpcStackInfo: NestedAseaStackInfo,
     vpcStack: CfnInclude,
     vpcId: string,
     subnets: { [name: string]: CfnSubnet },
-    policy?: {
-      name: string;
-      arn: string;
-    },
   ) {
     const networkFirewallConfig = this.props.networkConfig.centralNetworkServices?.networkFirewall;
     const firewallsConfig = networkFirewallConfig?.firewalls.filter(
       firewallConfig => firewallConfig && firewallConfig.vpc === vpcItem.name,
     );
     const firewallResources = this.filterResourcesByType(vpcStackInfo.resources, RESOURCE_TYPE.NETWORK_FIREWALL);
+
+    // If there are not any ASEA managed firewalls in resource mapping continue
     if (firewallResources.length === 0) {
       return;
-    } else if (!firewallsConfig || firewallsConfig.length === 0) {
-      this.scope.addLogs(LogLevel.WARN, `No Firewall found in configuration and firewall present in resource mapping`);
+    }
+
+    // Delete any ASEA managed firewalls if no firewalls are found in configuration
+    if (!firewallsConfig || firewallsConfig.length === 0) {
+      this.scope.addLogs(LogLevel.INFO, `No Firewall found in configuration`);
+      for (const firewallResource of firewallResources) {
+        this.scope.addLogs(LogLevel.WARN, `Removing firewall ${firewallResource.physicalResourceId} from ASEA stack`);
+        this.scope.node.tryRemoveChild(firewallResource.logicalResourceId);
+      }
       return;
     }
+
+    // Delete any ASEA managed firewalls that don't exist in configuration.
+    for (const firewallResource of firewallResources) {
+      const firewallName = firewallResource.resourceMetadata['Properties']['FirewallName'];
+      const firewallConfig = firewallsConfig.find(nfw => nfw.name === firewallName);
+      if (!firewallConfig) {
+        this.scope.addLogs(LogLevel.WARN, `Removing firewall ${firewallResource.physicalResourceId} from ASEA stack`);
+        vpcStack.node.tryRemoveChild(firewallResource.logicalResourceId);
+        return;
+      }
+    }
+
     for (const firewallItem of firewallsConfig) {
       const firewallResource = this.findResourceByName(firewallResources, 'FirewallName', firewallItem.name);
       if (!firewallResource) continue;
@@ -906,35 +1174,71 @@ export class VpcResources extends AseaResource {
         }
         if (subnetId) subnetIds.push(subnetId);
       });
-      let policyArn = !!policy && firewallItem.firewallPolicy === policy?.name ? policy.arn : undefined;
-      if (!policyArn) {
-        policyArn = this.scope.getExternalResourceParameter(
-          this.scope.getSsmPath(SsmResourceType.NFW_POLICY, [firewallItem.firewallPolicy]),
-        );
+
+      if (this.props.stage === AcceleratorStage.IMPORT_ASEA_RESOURCES) {
+        const firewallResource = this.findResourceByName(firewallResources, 'FirewallName', firewallItem.name);
+        if (!firewallResource) continue;
+        this.ssmParameters.push({
+          logicalId: pascalCase(`SsmParam${pascalCase(firewallItem.vpc) + pascalCase(firewallItem.name)}FirewallArn`),
+          parameterName: this.scope.getSsmPath(SsmResourceType.NFW, [firewallItem.vpc, firewallItem.name]),
+          stringValue: firewallResource?.physicalResourceId,
+        });
       }
-      if (!policyArn) {
-        throw new Error(
-          `Firewall is managed externally and no SSM Parameter found for policy "${firewallItem.firewallPolicy}"`,
-        );
-      }
-      const firewall = NetworkFirewall.includedCfnResource(vpcStack, firewallResource.logicalResourceId, {
-        firewallPolicyArn: policyArn,
-        name: firewallItem.name,
-        description: firewallItem.description,
-        subnets: subnetIds,
-        vpcId: vpcId,
-        deleteProtection: firewallItem.deleteProtection,
-        firewallPolicyChangeProtection: firewallItem.firewallPolicyChangeProtection,
-        subnetChangeProtection: firewallItem.subnetChangeProtection,
-      });
-      this.addFirewallLoggingConfiguration(vpcStackInfo, vpcStack, firewallItem);
-      this.ssmParameters.push({
-        logicalId: pascalCase(`SsmParam${pascalCase(firewallItem.vpc) + pascalCase(firewallItem.name)}FirewallArn`),
-        parameterName: this.scope.getSsmPath(SsmResourceType.NFW, [firewallItem.vpc, firewallItem.name]),
-        stringValue: firewall.attrFirewallArn,
-      });
+
       this.scope.addAseaResource(AseaResourceType.NFW, firewallItem.name);
+      if (this.props.stage === AcceleratorStage.POST_IMPORT_ASEA_RESOURCES) {
+        const region = vpcStackInfo.region;
+        const partition = this.props.partition;
+        const delegatedAdminAccountId = this.props.accountsConfig.getAccountId(
+          this.props.networkConfig.centralNetworkServices?.delegatedAdminAccount ?? '',
+        );
+        const firewallPolicyArn = `arn:${partition}:network-firewall:${region}:${delegatedAdminAccountId}:firewall-policy/${firewallItem.firewallPolicy}`;
+        const firewall = NetworkFirewall.includedCfnResource(vpcStack, firewallResource.logicalResourceId, {
+          firewallPolicyArn: firewallPolicyArn,
+          name: firewallItem.name,
+          description: firewallItem.description,
+          subnets: subnetIds,
+          vpcId: vpcId,
+          deleteProtection: firewallItem.deleteProtection,
+          firewallPolicyChangeProtection: firewallItem.firewallPolicyChangeProtection,
+          subnetChangeProtection: firewallItem.subnetChangeProtection,
+        });
+        this.addFirewallLoggingConfiguration(vpcStackInfo, vpcStack, firewallItem);
+        this.ssmParameters.push({
+          logicalId: pascalCase(`SsmParam${pascalCase(firewallItem.vpc) + pascalCase(firewallItem.name)}FirewallArn`),
+          parameterName: this.scope.getSsmPath(SsmResourceType.NFW, [firewallItem.vpc, firewallItem.name]),
+          stringValue: firewall.attrFirewallArn,
+        });
+      }
     }
+  }
+
+  /**
+   * Returns true if the given CIDR is valid
+   * @param cidr
+   * @returns
+   */
+  private isValidIpv4Cidr(cidr: string): boolean {
+    try {
+      IPv4CidrRange.fromCidr(cidr);
+    } catch (e) {
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Returns true if valid CIDR is valid
+   * @param cidr
+   * @returns
+   */
+  private isValidIpv6Cidr(cidr: string): boolean {
+    try {
+      IPv6CidrRange.fromCidr(cidr);
+    } catch (e) {
+      return false;
+    }
+    return true;
   }
 
   private createNetworkFirewallResources(
@@ -944,9 +1248,14 @@ export class VpcResources extends AseaResource {
     vpcId: string,
     subnets: { [name: string]: CfnSubnet },
   ) {
-    const ruleGroupsMap = this.createNetworkFirewallRuleGroups(vpcStackInfo, vpcStack);
-    const firewallPolicy = this.createNetworkFirewallPolicy(vpcStackInfo, vpcStack, ruleGroupsMap);
-    this.createNetworkFirewall(vpcItem, vpcStackInfo, vpcStack, vpcId, subnets, firewallPolicy);
+    if (this.props.stage === AcceleratorStage.IMPORT_ASEA_RESOURCES) {
+      this.createNetworkFirewall(vpcItem, vpcStackInfo, vpcStack, vpcId, subnets);
+    }
+    if (this.props.stage === AcceleratorStage.POST_IMPORT_ASEA_RESOURCES) {
+      this.deleteAseaNetworkFirewallRuleGroups(vpcStackInfo, vpcStack);
+      this.deleteAseaNetworkFirewallPolicy(vpcStackInfo, vpcStack);
+      this.createNetworkFirewall(vpcItem, vpcStackInfo, vpcStack, vpcId, subnets);
+    }
   }
 
   private gatewayEndpoints(

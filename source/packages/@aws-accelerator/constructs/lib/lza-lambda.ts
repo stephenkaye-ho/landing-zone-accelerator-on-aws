@@ -30,13 +30,13 @@ export interface LzaLambdaProps {
    */
   readonly assetPath: string;
   /**
-   * Custom resource lambda environment encryption key
+   * Custom resource lambda environment encryption key, when undefined default AWS managed key will be used
    */
-  readonly environmentEncryptionKmsKey: cdk.aws_kms.IKey;
+  readonly environmentEncryptionKmsKey?: cdk.aws_kms.IKey;
   /**
-   * Custom resource lambda log group encryption key
+   * Custom resource lambda log group encryption key, when undefined default AWS managed key will be used
    */
-  readonly cloudWatchLogKmsKey: cdk.aws_kms.IKey;
+  readonly cloudWatchLogKmsKey?: cdk.aws_kms.IKey;
   /**
    * Custom resource lambda cloudwatch log retention in days
    */

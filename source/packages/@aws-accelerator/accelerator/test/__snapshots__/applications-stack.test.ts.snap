@@ -2,12 +2,6 @@
 
 exports[`ApplicationsStack Construct(ApplicationsStack):  Snapshot Test 1`] = `
 {
-  "Parameters": {
-    "SsmParameterValueacceleratorkmscloudwatchkeyarnC96584B6F00A464EAD1953AFF4B05118Parameter": {
-      "Default": "/accelerator/kms/cloudwatch/key-arn",
-      "Type": "AWS::SSM::Parameter::Value<String>",
-    },
-  },
   "Resources": {
     "CustomPortfolioAssociationsRoleArnProviderCustomPortfolioAssociationsRoleArnProviderProviderLambda303083B3": {
       "DependsOn": [
@@ -254,9 +248,6 @@ exports[`ApplicationsStack Construct(ApplicationsStack):  Snapshot Test 1`] = `
     "CustomPropagatePortfolioAssociationsCustomResourceProviderLogGroup44DE568D": {
       "DeletionPolicy": "Delete",
       "Properties": {
-        "KmsKeyId": {
-          "Ref": "SsmParameterValueacceleratorkmscloudwatchkeyarnC96584B6F00A464EAD1953AFF4B05118Parameter",
-        },
         "LogGroupName": {
           "Fn::Join": [
             "",
@@ -404,7 +395,7 @@ exports[`ApplicationsStack Construct(ApplicationsStack):  Snapshot Test 1`] = `
             "DisableTemplateValidation": false,
             "Info": {
               "LoadTemplateFromURL": {
-                "Fn::Sub": "https://s3.us-east-1.\${AWS::URLSuffix}/cdk-hnb659fds-assets-444444444444-us-east-1/aceb01523a897becf844697e46e8bc7e39ca412aaea003f99d86339b3642c048.yaml",
+                "Fn::Sub": "https://s3.us-east-1.\${AWS::URLSuffix}/cdk-hnb659fds-assets-444444444444-us-east-1/1f420304268aa1de8b41800e1b887efb6dcd863358d324c76ea4fe6cbd8e3765.yaml",
               },
             },
             "Name": "v1",
@@ -449,7 +440,7 @@ exports[`ApplicationsStack Construct(ApplicationsStack):  Snapshot Test 1`] = `
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-CustomizationsStack-444444444444-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },

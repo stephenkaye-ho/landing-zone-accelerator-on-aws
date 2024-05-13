@@ -19,7 +19,10 @@ import winston from 'winston';
 import { AccountsConfig } from '../lib/accounts-config';
 import { GlobalConfig } from '../lib/global-config';
 import { IamConfig } from '../lib/iam-config';
+import { SecurityConfig } from '../lib/security-config';
 import { OrganizationConfig } from '../lib/organization-config';
+import { CommonValidatorFunctions } from './common/common-validator-functions';
+import { DeploymentTargets } from '../lib/common-types';
 
 export class GlobalConfigValidator {
   constructor(
@@ -27,6 +30,7 @@ export class GlobalConfigValidator {
     accountsConfig: AccountsConfig,
     iamConfig: IamConfig,
     organizationConfig: OrganizationConfig,
+    securityConfig: SecurityConfig,
     configDir: string,
   ) {
     const ouIdNames: string[] = ['Root'];
@@ -58,6 +62,10 @@ export class GlobalConfigValidator {
     //
     this.validateBudgetDeploymentTargetOUs(values, ouIdNames, errors);
     //
+    // budget subscribers address validation
+    //
+    this.validateBudgetSubscriberAddress(values, errors);
+    //
     // budget notification email validation
     //
     this.validateBudgetNotificationEmailIds(values, errors);
@@ -84,6 +92,10 @@ export class GlobalConfigValidator {
     // Validate Imported Access logs bucket resource policies
     //
     this.validateImportedAccessLogsBucketPolicies(configDir, values, errors);
+    //
+    // Validate configuration of Imported Assets bucket
+    //
+    this.validateImportedAssetBucketConfig(configDir, accountsConfig, values, errors);
     //
     // validate cloudwatch logging
     //
@@ -130,6 +142,33 @@ export class GlobalConfigValidator {
     // Max concurrency validation
     //
     this.validateMaxConcurrency(values, errors);
+
+    //
+    // Validate deployment targets
+    //
+    this.validateDeploymentTargetAccountNames(values, accountNames, errors);
+    this.validateDeploymentTargetOUs(values, ouIdNames, errors);
+
+    //
+    // bucket policy validation
+    //
+    if (securityConfig.centralSecurityServices.s3PublicAccessBlock.enable) {
+      this.validateAccessLogsS3Policy(configDir, values, errors);
+      this.validateCentralLogsS3Policy(configDir, values, errors);
+      this.validateElbLogsS3Policy(configDir, values, errors);
+    }
+
+    //
+    // Validate AccessLogs bucket configuration
+    //
+    this.validateAccessLogsBucketConfigDeploymentTargetOUs(values, ouIdNames, errors);
+    this.validateAccessLogsBucketConfigDeploymentTargetAccounts(values, accountNames, errors);
+
+    //
+    // Validate S3 configuration
+    //
+    this.validateS3ConfigDeploymentTargetOUs(values, ouIdNames, errors);
+    this.validateS3ConfigDeploymentTargetAccounts(values, accountNames, errors);
 
     if (errors.length) {
       throw new Error(`${GlobalConfig.FILENAME} has ${errors.length} issues:\n${errors.join('\n')}`);
@@ -216,6 +255,22 @@ export class GlobalConfigValidator {
   }
 
   /**
+   * Function to validate budget subscriber address
+   * @param values
+   */
+  private validateBudgetSubscriberAddress(values: GlobalConfig, errors: string[]) {
+    for (const budget of values.reports?.budgets ?? []) {
+      for (const notification of budget.notifications ?? []) {
+        if (notification.address && notification.recipients) {
+          errors.push(`Cannot specify an address and a list of recipients for budget ${budget.name}.`);
+        } else if (!notification.address && !notification.recipients) {
+          errors.push(`Provide either an address or a list of recipients for budget ${budget.name}.`);
+        }
+      }
+    }
+  }
+
+  /**
    * Function to validate budget notification email address
    * @param values
    */
@@ -223,13 +278,29 @@ export class GlobalConfigValidator {
     for (const budget of values.reports?.budgets ?? []) {
       for (const notification of budget.notifications ?? []) {
         if (notification.subscriptionType === 'EMAIL') {
-          if (!emailValidator.validate(notification.address!)) {
+          if (Array.isArray(notification.recipients)) {
+            for (const recipient of notification.recipients) {
+              if (!emailValidator.validate(recipient)) {
+                errors.push(`Invalid report notification email ${recipient}.`);
+              }
+            }
+          } else if (!emailValidator.validate(notification.address!)) {
             errors.push(`Invalid report notification email ${notification.address!}.`);
           }
         } else if (notification.subscriptionType === 'SNS') {
           const snsGetArnRegex = new RegExp('^arn:.*:sns:.*:(.*):(.*)$');
-          const validSnsArn = snsGetArnRegex.test(notification.address);
-          if (!validSnsArn) {
+          if (Array.isArray(notification.recipients)) {
+            for (const recipient of notification.recipients) {
+              if (!snsGetArnRegex.test(recipient)) {
+                errors.push(`The following SNS Topic Arn is malformatted: ${recipient}.`);
+              }
+              if (notification.recipients.length > 1) {
+                errors.push(
+                  `SNS subscription type can have only one SNS topic as a recipient: ${notification.recipients}.`,
+                );
+              }
+            }
+          } else if (!snsGetArnRegex.test(notification.address!)) {
             errors.push(`The following SNS Topic Arn is malformatted: ${notification.address}.`);
           }
         }
@@ -299,6 +370,142 @@ export class GlobalConfigValidator {
         errors.push(
           `AccessLogs bucket resource policy attachment file ${s3ResourcePolicyAttachment.policy} not found !!!`,
         );
+      }
+    }
+  }
+
+  /**
+   * Function to validate imported Assets bucket config
+   * @param configDir string
+   * @param values {@link GlobalConfig}
+   * @param errors string[]
+   * @returns
+   */
+  private validateImportedAssetBucketConfig(
+    configDir: string,
+    accountsConfig: AccountsConfig,
+    values: GlobalConfig,
+    errors: string[],
+  ) {
+    this.validateImportedAssetBucketPolicies(configDir, values, errors);
+    this.validateImportedAssetBucketKmsPolicies(configDir, values, errors);
+    this.validateCmkExistsInManagementAccount(accountsConfig, values, errors);
+  }
+  /**
+   * Function to validate imported Assets S3 bucket policies
+   * @param configDir string
+   * @param values {@link GlobalConfig}
+   * @param errors string[]
+   * @returns
+   */
+  private validateImportedAssetBucketPolicies(configDir: string, values: GlobalConfig, errors: string[]) {
+    if (!values.logging.assetBucket) {
+      return;
+    }
+    const assetBucketItem = values.logging.assetBucket!;
+    const importedBucketItem = assetBucketItem.importedBucket;
+
+    if (importedBucketItem && assetBucketItem.customPolicyOverrides?.s3Policy) {
+      if (!fs.existsSync(path.join(configDir, assetBucketItem.customPolicyOverrides?.s3Policy))) {
+        errors.push(
+          `Assets bucket custom policy overrides file ${assetBucketItem.customPolicyOverrides?.s3Policy} not found !!!`,
+        );
+      }
+
+      if (importedBucketItem.applyAcceleratorManagedBucketPolicy) {
+        errors.push(
+          `Imported Assets bucket with customPolicyOverrides.policy can not have applyAcceleratorManagedPolicy set to true.`,
+        );
+      }
+      if (assetBucketItem.s3ResourcePolicyAttachments) {
+        errors.push(
+          `Imported AccessLogs bucket with customPolicyOverrides.policy can not have s3ResourcePolicyAttachments.`,
+        );
+      }
+    }
+
+    for (const s3ResourcePolicyAttachment of assetBucketItem.s3ResourcePolicyAttachments ?? []) {
+      if (!fs.existsSync(path.join(configDir, s3ResourcePolicyAttachment.policy))) {
+        errors.push(
+          `AccessLogs bucket resource policy attachment file ${s3ResourcePolicyAttachment.policy} not found !!!`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate imported CentralLogs bucket kms policies
+   * @param configDir string
+   * @param values {@link GlobalConfig}
+   * @param errors string[]
+   * @returns
+   */
+  private validateImportedAssetBucketKmsPolicies(configDir: string, values: GlobalConfig, errors: string[]) {
+    if (!values.logging.assetBucket) {
+      return;
+    }
+
+    const assetBucketItem = values.logging.assetBucket;
+    const importedBucketItem = assetBucketItem.importedBucket;
+
+    if (!importedBucketItem) {
+      return;
+    }
+
+    const createAcceleratorManagedKey = importedBucketItem.createAcceleratorManagedKey ?? false;
+
+    if (assetBucketItem.customPolicyOverrides?.kmsPolicy) {
+      if (!fs.existsSync(path.join(configDir, assetBucketItem.customPolicyOverrides.kmsPolicy))) {
+        errors.push(
+          `Assets bucket encryption custom policy overrides file ${assetBucketItem.customPolicyOverrides.kmsPolicy} not found !!!`,
+        );
+      }
+
+      if (assetBucketItem.kmsResourcePolicyAttachments) {
+        errors.push(
+          `Imported Assets bucket with customPolicyOverrides.kmsPolicy can not have policy attachments through centralLogBucketItem.kmsResourcePolicyAttachments.`,
+        );
+      }
+    }
+
+    if (!createAcceleratorManagedKey && assetBucketItem.kmsResourcePolicyAttachments) {
+      errors.push(
+        `Imported Assets bucket with createAcceleratorManagedKey set to false can not have policy attachments through centralLogBucketItem.kmsResourcePolicyAttachments. Accelerator will not be able to attach policies for the bucket key not created by solution.`,
+      );
+    }
+
+    for (const kmsResourcePolicyAttachment of assetBucketItem.kmsResourcePolicyAttachments ?? []) {
+      if (!fs.existsSync(path.join(configDir, kmsResourcePolicyAttachment.policy))) {
+        errors.push(
+          `Assets bucket encryption policy attachment file ${kmsResourcePolicyAttachment.policy} not found !!!`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate if S3 CMK exists in Management Account when using an imported Asset S3 Bucket
+   * @param accountsConfig {@link AccountsConfig}
+   * @param values {@link GlobalConfig}
+   * @param errors string[]
+   * @returns
+   */
+  private validateCmkExistsInManagementAccount(accountsConfig: AccountsConfig, values: GlobalConfig, errors: string[]) {
+    if (values.s3?.encryption?.createCMK) {
+      if (values.logging.assetBucket?.importedBucket?.createAcceleratorManagedKey) {
+        const cmkDeploymentTargetSets = CommonValidatorFunctions.getAccountNamesFromDeploymentTargets(
+          accountsConfig,
+          values.s3?.encryption?.deploymentTargets as DeploymentTargets,
+        );
+        const managementAccountInTargets = cmkDeploymentTargetSets.find(item => item === 'Management');
+        const homeRegionInTargets = !values.s3?.encryption?.deploymentTargets?.excludedRegions.find(
+          item => item === values.homeRegion,
+        );
+        if (!managementAccountInTargets || !homeRegionInTargets) {
+          errors.push(
+            `Imported Assets bucket with createAcceleratorManagedKey being set to true has to have the CDK deployed to the Management account in the home region.`,
+          );
+        }
       }
     }
   }
@@ -648,6 +855,158 @@ export class GlobalConfigValidator {
     }
   }
 
+  /**
+   * Validate Access Log S3 bucket policy for AWS Principal if block public access is enabled.
+   * @param configDir
+   * @param values
+   * @returns
+   */
+  private validateAccessLogsS3Policy(configDir: string, values: GlobalConfig, errors: string[]) {
+    for (const s3ResourcePolicyAttachment of values.logging.accessLogBucket?.s3ResourcePolicyAttachments ?? []) {
+      const principalValue = fs.readFileSync(path.join(configDir, s3ResourcePolicyAttachment.policy), 'utf-8');
+      const tempValue = JSON.parse(principalValue);
+      for (const item of tempValue.Statement ?? []) {
+        if (
+          item.Effect === 'Allow' &&
+          (item.Principal.AWS === '*' || item.Principal === '*') &&
+          !item.Condition.StringEquals?.['aws:PrincipalOrgID']
+        ) {
+          errors.push(
+            `Adding policy will make the Access Log S3 Bucket public and conflicts with the Block Public Access setting.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of S3 configuration deployment target Accounts
+   * Make sure deployment target Accounts are part of account config file
+   * @param values
+   */
+  private validateS3ConfigDeploymentTargetAccounts(values: GlobalConfig, accountNames: string[], errors: string[]) {
+    if (!values.s3?.encryption?.deploymentTargets) {
+      return;
+    }
+    for (const account of values.s3.encryption.deploymentTargets.accounts ?? []) {
+      if (accountNames.indexOf(account) === -1) {
+        errors.push(
+          `Deployment target account ${account} for S3 encryption configuration does not exists in accounts-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of S3 bucket config deployment target OUs
+   * Make sure deployment target OUs are part of Organization config file
+   * @param values
+   */
+  private validateS3ConfigDeploymentTargetOUs(values: GlobalConfig, ouIdNames: string[], errors: string[]) {
+    if (!values.s3?.encryption?.deploymentTargets) {
+      return;
+    }
+    for (const ou of values.s3.encryption.deploymentTargets.organizationalUnits ?? []) {
+      if (ouIdNames.indexOf(ou) === -1) {
+        errors.push(
+          `Deployment target OU ${ou} for S3 encryption configuration does not exist in organization-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of AccessLogs bucket configuration deployment target Accounts
+   * Make sure deployment target Accounts are part of account config file
+   * @param values
+   */
+  private validateAccessLogsBucketConfigDeploymentTargetAccounts(
+    values: GlobalConfig,
+    accountNames: string[],
+    errors: string[],
+  ) {
+    if (!values.logging.accessLogBucket?.deploymentTargets) {
+      return;
+    }
+    for (const account of values.logging.accessLogBucket.deploymentTargets.accounts ?? []) {
+      if (accountNames.indexOf(account) === -1) {
+        errors.push(
+          `Deployment target account ${account} for AccessLogs bucket encryption configuration does not exists in accounts-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of AccessLogs bucket config deployment target OUs
+   * Make sure deployment target OUs are part of Organization config file
+   * @param values
+   */
+  private validateAccessLogsBucketConfigDeploymentTargetOUs(
+    values: GlobalConfig,
+    ouIdNames: string[],
+    errors: string[],
+  ) {
+    if (!values.logging.accessLogBucket?.deploymentTargets) {
+      return;
+    }
+    for (const ou of values.logging.accessLogBucket.deploymentTargets.organizationalUnits ?? []) {
+      if (ouIdNames.indexOf(ou) === -1) {
+        errors.push(
+          `Deployment target OU ${ou} for AccessLogs bucket configuration does not exist in organization-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Validate Central S3 bucket policy for AWS Principal if block public access is enabled.
+   * @param configDir
+   * @param values
+   * @returns
+   */
+  private validateCentralLogsS3Policy(configDir: string, values: GlobalConfig, errors: string[]) {
+    for (const s3ResourcePolicyAttachment of values.logging.centralLogBucket?.s3ResourcePolicyAttachments ?? []) {
+      const principalValue = fs.readFileSync(path.join(configDir, s3ResourcePolicyAttachment.policy), 'utf-8');
+      const tempValue = JSON.parse(principalValue);
+      for (const item of tempValue.Statement ?? []) {
+        if (
+          item.Effect === 'Allow' &&
+          (item.Principal.AWS === '*' || item.Principal === '*') &&
+          !item.Condition.StringEquals?.['aws:PrincipalOrgID']
+        ) {
+          errors.push(
+            `Adding policy will make the Central S3 Bucket public and conflicts with the Block Public Access setting.`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Validate ELB Log S3 bucket policy for AWS Principal if block public access is enabled.
+   * @param configDir
+   * @param values
+   * @returns
+   */
+  private validateElbLogsS3Policy(configDir: string, values: GlobalConfig, errors: string[]) {
+    for (const s3ResourcePolicyAttachment of values.logging.elbLogBucket?.s3ResourcePolicyAttachments ?? []) {
+      const principalValue = fs.readFileSync(path.join(configDir, s3ResourcePolicyAttachment.policy), 'utf-8');
+      const tempValue = JSON.parse(principalValue);
+      for (const item of tempValue.Statement ?? []) {
+        if (
+          item.Effect === 'Allow' &&
+          (item.Principal.AWS === '*' || item.Principal === '*') &&
+          !item.Condition.StringEquals?.['aws:PrincipalOrgID']
+        ) {
+          errors.push(
+            `Adding policy will make the ELB Log S3 Bucket public and conflicts with the Block Public Access setting.`,
+          );
+        }
+      }
+    }
+  }
+
   // Check if input is valid array and proceed to check schema
   private checkForArray(inputStr: string, errorMessage: string, errors: string[]) {
     if (Array.isArray(inputStr)) {
@@ -774,11 +1133,119 @@ export class GlobalConfigValidator {
    * validateMaxConcurrency
    */
   private validateMaxConcurrency(values: GlobalConfig, errors: string[]) {
-    if (values.acceleratorSettings?.maxConcurrentStacks ?? 250 > 250) {
+    const maxConcurrentStacks = values.acceleratorSettings?.maxConcurrentStacks ?? 250;
+    if (maxConcurrentStacks > 250) {
       errors.push(
         `Provided acceleratorSettings.maxConcurrentStacks: ${values.acceleratorSettings!
           .maxConcurrentStacks!} it cannot be greater than 250 `,
       );
+    }
+  }
+
+  /**
+   * Function to validate Deployment targets account name for security services
+   * @param values
+   */
+  private validateDeploymentTargetAccountNames(values: GlobalConfig, accountNames: string[], errors: string[]) {
+    this.validateLambdaEncryptionConfigDeploymentTargetAccounts(values, accountNames, errors);
+    this.validateCloudWatchLogsEncryptionConfigDeploymentTargetAccounts(values, accountNames, errors);
+  }
+
+  /**
+   * Function to validate Deployment targets OU name for security services
+   * @param values
+   */
+  private validateDeploymentTargetOUs(values: GlobalConfig, ouIdNames: string[], errors: string[]) {
+    this.validateLambdaEncryptionConfigDeploymentTargetOUs(values, ouIdNames, errors);
+    this.validateCloudWatchLogsEncryptionDeploymentTargetOUs(values, ouIdNames, errors);
+  }
+
+  /**
+   * Function to validate existence of Lambda encryption configuration deployment target OUs
+   * Make sure deployment target OUs are part of Organization config file
+   * @param values
+   */
+  private validateLambdaEncryptionConfigDeploymentTargetOUs(
+    values: GlobalConfig,
+    ouIdNames: string[],
+    errors: string[],
+  ) {
+    if (!values.lambda?.encryption) {
+      return;
+    }
+
+    for (const ou of values.lambda.encryption.deploymentTargets?.organizationalUnits ?? []) {
+      if (ouIdNames.indexOf(ou) === -1) {
+        errors.push(
+          `Deployment target OU ${ou} for lambda encryption configuration does not exists in organization-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of Lambda encryption configuration deployment target Accounts
+   * Make sure deployment target Accounts are part of account config file
+   * @param values
+   */
+  private validateLambdaEncryptionConfigDeploymentTargetAccounts(
+    values: GlobalConfig,
+    accountNames: string[],
+    errors: string[],
+  ) {
+    if (!values.lambda?.encryption) {
+      return;
+    }
+    for (const account of values.lambda.encryption?.deploymentTargets?.accounts ?? []) {
+      if (accountNames.indexOf(account) === -1) {
+        errors.push(
+          `Deployment target account ${account} for Lambda encryption configuration does not exists in accounts-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of CloudWatch log group encryption configuration deployment target Accounts
+   * Make sure deployment target Accounts are part of account config file
+   * @param values
+   */
+  private validateCloudWatchLogsEncryptionConfigDeploymentTargetAccounts(
+    values: GlobalConfig,
+    accountNames: string[],
+    errors: string[],
+  ) {
+    if (!values.logging.cloudwatchLogs?.encryption) {
+      return;
+    }
+    for (const account of values.logging.cloudwatchLogs.encryption.deploymentTargets?.accounts ?? []) {
+      if (accountNames.indexOf(account) === -1) {
+        errors.push(
+          `Deployment target account ${account} for CloudWatch logs encryption configuration does not exists in accounts-config.yaml file.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Function to validate existence of CloudWatch encryption deployment target OUs
+   * Make sure deployment target OUs are part of Organization config file
+   * @param values
+   */
+  private validateCloudWatchLogsEncryptionDeploymentTargetOUs(
+    values: GlobalConfig,
+    ouIdNames: string[],
+    errors: string[],
+  ) {
+    if (!values.logging.cloudwatchLogs?.encryption) {
+      return;
+    }
+    for (const ou of values.logging.cloudwatchLogs.encryption.deploymentTargets?.organizationalUnits ?? []) {
+      if (ouIdNames.indexOf(ou) === -1) {
+        errors.push(
+          `Deployment target OU ${ou} for CloudWatch logs encryption does not exist in organization-config.yaml file.`,
+        );
+      }
     }
   }
 }

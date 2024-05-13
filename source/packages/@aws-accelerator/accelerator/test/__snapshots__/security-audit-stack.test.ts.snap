@@ -330,16 +330,6 @@ def script_handler(events, context):
     },
     "AuditManagerPublishingDestinationBucket74974FCF": {
       "DeletionPolicy": "Retain",
-      "Metadata": {
-        "cdk_nag": {
-          "rules_to_suppress": [
-            {
-              "id": "AwsSolutions-S1",
-              "reason": "AuditManagerPublishingDestinationBucket has server access logs disabled till the task for access logging completed.",
-            },
-          ],
-        },
-      },
       "Properties": {
         "BucketEncryption": {
           "ServerSideEncryptionConfiguration": [
@@ -2067,7 +2057,6 @@ def script_handler(events, context):
         "enableEksProtection": true,
         "enableS3Protection": true,
         "exportFrequency": "FIFTEEN_MINUTES",
-        "region": "us-east-1",
       },
       "Type": "Custom::GuardDutyUpdateDetector",
       "UpdateReplacePolicy": "Delete",
@@ -2480,6 +2469,74 @@ def script_handler(events, context):
       "Type": "Custom::SSMShareDocument",
       "UpdateReplacePolicy": "Delete",
     },
+    "ResourcePolicyEnforcementRemediationDocumentAwsAcceleratorAttachResourceBasedPolicy51D68FB6": {
+      "Properties": {
+        "Content": {
+          "assumeRole": "{{ AutomationAssumeRole }}",
+          "description": "Resource-based Policy",
+          "mainSteps": [
+            {
+              "action": "aws:invokeLambdaFunction",
+              "inputs": {
+                "FunctionName": "{{ FunctionName }}",
+                "InputPayload": {
+                  "ConfigRuleName": "{{ ConfigRuleName }}",
+                  "ResourceId": "{{ ResourceId }}",
+                },
+                "InvocationType": "RequestResponse",
+              },
+              "name": "invokeLambdaFunction",
+            },
+          ],
+          "parameters": {
+            "AutomationAssumeRole": {
+              "type": "String",
+            },
+            "ConfigRuleName": {
+              "type": "String",
+            },
+            "FunctionName": {
+              "type": "String",
+            },
+            "ResourceId": {
+              "type": "String",
+            },
+          },
+          "schemaVersion": "0.3",
+        },
+        "DocumentType": "Automation",
+        "Name": "AWSAccelerator-Attach-Resource-Based-Policy",
+        "UpdateMethod": "NewVersion",
+      },
+      "Type": "AWS::SSM::Document",
+    },
+    "ResourcePolicyEnforcementRemediationDocumentAwsAcceleratorAttachResourceBasedPolicyShareDocument7708A01C": {
+      "DeletionPolicy": "Delete",
+      "DependsOn": [
+        "CustomSSMShareDocumentCustomResourceProviderLogGroup11AEA42B",
+      ],
+      "Properties": {
+        "ServiceToken": {
+          "Fn::GetAtt": [
+            "CustomSSMShareDocumentCustomResourceProviderHandler02D98C87",
+            "Arn",
+          ],
+        },
+        "accountIds": [
+          "111111111111",
+          "222222222222",
+          "333333333333",
+          "444444444444",
+          "555555555555",
+          "666666666666",
+        ],
+        "name": {
+          "Ref": "ResourcePolicyEnforcementRemediationDocumentAwsAcceleratorAttachResourceBasedPolicy51D68FB6",
+        },
+      },
+      "Type": "Custom::SSMShareDocument",
+      "UpdateReplacePolicy": "Delete",
+    },
     "SecurityHubMembers2A2B77C4": {
       "DeletionPolicy": "Delete",
       "DependsOn": [
@@ -2633,7 +2690,7 @@ def script_handler(events, context):
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-SecurityAuditStack-222222222222-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -2975,16 +3032,6 @@ def script_handler(events, context):
     },
     "AuditManagerPublishingDestinationBucket74974FCF": {
       "DeletionPolicy": "Retain",
-      "Metadata": {
-        "cdk_nag": {
-          "rules_to_suppress": [
-            {
-              "id": "AwsSolutions-S1",
-              "reason": "AuditManagerPublishingDestinationBucket has server access logs disabled till the task for access logging completed.",
-            },
-          ],
-        },
-      },
       "Properties": {
         "BucketEncryption": {
           "ServerSideEncryptionConfiguration": [
@@ -4726,7 +4773,6 @@ def script_handler(events, context):
         "enableEksProtection": false,
         "enableS3Protection": true,
         "exportFrequency": "FIFTEEN_MINUTES",
-        "region": "us-east-1",
       },
       "Type": "Custom::GuardDutyUpdateDetector",
       "UpdateReplacePolicy": "Delete",
@@ -5004,7 +5050,7 @@ def script_handler(events, context):
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-SecurityAuditStack-222222222222-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },

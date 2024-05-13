@@ -15,6 +15,7 @@ import {
   AseaResourceType,
   CustomerGatewayConfig,
   DefaultVpcsConfig,
+  Ec2FirewallInstanceConfig,
   VpcConfig,
   VpcFlowLogsConfig,
   VpcTemplatesConfig,
@@ -37,12 +38,11 @@ import { getVpc, getVpcConfig } from '../utils/getter-utils';
 import { isIpv4 } from '../utils/validation-utils';
 
 export class VpcResources {
-  public readonly deleteDefaultVpc: boolean;
+  public readonly deleteDefaultVpc?: DeleteDefaultVpc;
   public readonly sharedParameterMap: Map<string, SsmParameterProps[]>;
   public readonly vpcMap: Map<string, Vpc>;
   public readonly vpnMap: Map<string, string>;
   public readonly centralEndpointRole?: cdk.aws_iam.Role;
-  public readonly vpcPeeringRole?: cdk.aws_iam.Role;
 
   private stack: NetworkStack;
 
@@ -57,10 +57,10 @@ export class VpcResources {
     this.deleteDefaultVpc = this.deleteDefaultVpcMethod(props.networkConfig.defaultVpc);
     // Create central endpoints role
     this.centralEndpointRole = this.createCentralEndpointRole(props);
-    // Create VPC peering role
-    this.vpcPeeringRole = this.createVpcPeeringRole(props);
     // Create VPCs
     this.vpcMap = this.createVpcs(this.stack.vpcsInScope, ipamPoolMap, dhcpOptionsIds, props);
+    // Create cross-account route role
+    this.createCrossAccountRouteRole(props);
     //
     // Create VPN custom resource handler if needed
     const customResourceHandler = this.stack.advancedVpnTypes.includes('vpc')
@@ -83,19 +83,18 @@ export class VpcResources {
    * @param props
    * @returns
    */
-  private deleteDefaultVpcMethod(defaultVpc: DefaultVpcsConfig): boolean {
+  private deleteDefaultVpcMethod(defaultVpc: DefaultVpcsConfig): DeleteDefaultVpc | undefined {
     const accountExcluded = defaultVpc.excludeAccounts && this.stack.isAccountExcluded(defaultVpc.excludeAccounts);
     const regionExcluded = defaultVpc.excludeRegions && this.stack.isRegionExcluded(defaultVpc.excludeRegions);
 
     if (defaultVpc.delete && !accountExcluded && !regionExcluded) {
       this.stack.addLogs(LogLevel.INFO, 'Add DeleteDefaultVpc');
-      new DeleteDefaultVpc(this.stack, 'DeleteDefaultVpc', {
+      return new DeleteDefaultVpc(this.stack, 'DeleteDefaultVpc', {
         kmsKey: this.stack.cloudwatchKey,
         logRetentionInDays: this.stack.logRetention,
       });
-      return true;
     }
-    return false;
+    return;
   }
 
   /**
@@ -187,52 +186,74 @@ export class VpcResources {
   }
 
   /**
-   * Create VPC peering role if requester VPCs exist in external account(s)
+   * Add necessary permissions to cross-account role if VPC peering is implemented
    * @param props
    */
-  private createVpcPeeringRole(props: AcceleratorStackProps): cdk.aws_iam.Role | undefined {
+  private getCrossAccountRoutePolicies(peeringAccountIds: string[], ssmPrefix: string) {
+    const policyStatements = [
+      new cdk.aws_iam.PolicyStatement({
+        effect: cdk.aws_iam.Effect.ALLOW,
+        actions: ['ec2:CreateRoute', 'ec2:DeleteRoute'],
+        resources: [`arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:route-table/*`],
+      }),
+      new cdk.aws_iam.PolicyStatement({
+        effect: cdk.aws_iam.Effect.ALLOW,
+        actions: ['ssm:GetParameter'],
+        resources: [
+          `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter${ssmPrefix}/network/*`,
+        ],
+      }),
+    ];
+
+    if (peeringAccountIds.length > 0) {
+      policyStatements.push(
+        new cdk.aws_iam.PolicyStatement({
+          effect: cdk.aws_iam.Effect.ALLOW,
+          actions: [
+            'ec2:AcceptVpcPeeringConnection',
+            'ec2:CreateVpcPeeringConnection',
+            'ec2:DeleteVpcPeeringConnection',
+          ],
+          resources: [
+            `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc/*`,
+            `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc-peering-connection/*`,
+          ],
+        }),
+      );
+    }
+    return policyStatements;
+  }
+
+  /**
+   * Create cross-account route role if target ENIs exist in external account(s) or peering connections defined
+   * @param props
+   */
+  private createCrossAccountRouteRole(props: AcceleratorStackProps): cdk.aws_iam.Role | undefined {
+    const crossAccountEniAccountIds = this.getCrossAccountEniAccountIds(props);
     const vpcPeeringAccountIds = this.getVpcPeeringAccountIds(props);
+    const policyList = this.getCrossAccountRoutePolicies(vpcPeeringAccountIds, props.prefixes.ssmParamName);
+
     //
-    // Create VPC peering role
+    // Create cross account route role
     //
-    if (vpcPeeringAccountIds.length > 0) {
-      this.stack.addLogs(LogLevel.INFO, `Create cross-account IAM role for VPC peering`);
+    const accountIdSet = [...new Set([...(crossAccountEniAccountIds ?? []), ...(vpcPeeringAccountIds ?? [])])];
+    if (accountIdSet.length > 0) {
+      this.stack.addLogs(
+        LogLevel.INFO,
+        `Creating cross-account role for the creation of VPC peering connections and routes targeting ENIs`,
+      );
 
       const principals: cdk.aws_iam.PrincipalBase[] = [];
-      vpcPeeringAccountIds.forEach(accountId => {
+      for (const accountId of accountIdSet) {
         principals.push(new cdk.aws_iam.AccountPrincipal(accountId));
-      });
+      }
+
       const role = new cdk.aws_iam.Role(this.stack, 'VpcPeeringRole', {
         roleName: `${props.prefixes.accelerator}-VpcPeeringRole-${cdk.Stack.of(this.stack).region}`,
         assumedBy: new cdk.aws_iam.CompositePrincipal(...principals),
         inlinePolicies: {
           default: new cdk.aws_iam.PolicyDocument({
-            statements: [
-              new cdk.aws_iam.PolicyStatement({
-                effect: cdk.aws_iam.Effect.ALLOW,
-                actions: [
-                  'ec2:AcceptVpcPeeringConnection',
-                  'ec2:CreateVpcPeeringConnection',
-                  'ec2:DeleteVpcPeeringConnection',
-                ],
-                resources: [
-                  `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc/*`,
-                  `arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:vpc-peering-connection/*`,
-                ],
-              }),
-              new cdk.aws_iam.PolicyStatement({
-                effect: cdk.aws_iam.Effect.ALLOW,
-                actions: ['ec2:CreateRoute', 'ec2:DeleteRoute'],
-                resources: [`arn:${cdk.Aws.PARTITION}:ec2:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:route-table/*`],
-              }),
-              new cdk.aws_iam.PolicyStatement({
-                effect: cdk.aws_iam.Effect.ALLOW,
-                actions: ['ssm:GetParameter'],
-                resources: [
-                  `arn:${cdk.Aws.PARTITION}:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter${props.prefixes.ssmParamName}/network/*`,
-                ],
-              }),
-            ],
+            statements: policyList,
           }),
         },
       });
@@ -242,7 +263,7 @@ export class VpcResources {
       NagSuppressions.addResourceSuppressionsByPath(this.stack, `${this.stack.stackName}/VpcPeeringRole/Resource`, [
         {
           id: 'AwsSolutions-IAM5',
-          reason: 'VpcPeeringRole needs access to create peering connections for VPCs in the account ',
+          reason: 'VpcPeeringRole needs access to create routes for VPCs in the account',
         },
       ]);
       return role;
@@ -251,8 +272,56 @@ export class VpcResources {
   }
 
   /**
+   * Return an array of cross-account ENI target account IDs
+   * if a VPC containing relevant route table exists in this account+region
+   * @param props
+   * @returns
+   */
+  private getCrossAccountEniAccountIds(props: AcceleratorStackProps): string[] {
+    const firewallTargetAccountIds: string[] = [];
+
+    for (const firewallInstance of [
+      ...(props.customizationsConfig.firewalls?.instances ?? []),
+      ...(props.customizationsConfig.firewalls?.managerInstances ?? []),
+    ]) {
+      // check for potential targets
+      if (this.isFirewallOwnedByDifferentAccount(props, firewallInstance)) {
+        const vpcConfig = getVpcConfig(this.stack.vpcResources, firewallInstance.vpc);
+        for (const routeTable of vpcConfig.routeTables ?? []) {
+          for (const route of routeTable.routes ?? []) {
+            if (route.type === 'networkInterface' && route?.target?.includes(firewallInstance.name)) {
+              const firewallOwner = props.accountsConfig.getAccountId(firewallInstance.account!);
+              firewallTargetAccountIds.push(firewallOwner);
+            }
+          }
+        }
+      }
+    }
+    return firewallTargetAccountIds;
+  }
+
+  /**
+   * Check the account and vpc property of an EC2 firewall to determine if it is owned by a different account and deployed in a VPC owned by this account
+   * @param props
+   * @returns
+   */
+  private isFirewallOwnedByDifferentAccount(
+    props: AcceleratorStackProps,
+    firewallConfig: Ec2FirewallInstanceConfig,
+  ): boolean {
+    // Check that firewall has account specified that is not this account
+    if (firewallConfig.account && props.accountsConfig.getAccountId(firewallConfig.account) !== this.stack.account) {
+      // Check that the firewall's target VPC is deployed in this account
+      if (this.vpcMap.has(firewallConfig.vpc)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Return an array of VPC peering requester account IDs
-   * if an accepeter VPC exists in this account+region
+   * if an accepter VPC exists in this account+region
    * @param props
    * @returns
    */
@@ -364,6 +433,10 @@ export class VpcResources {
     // Delete default security group rules
     //
     this.deleteDefaultSgRules(vpc, vpcItem);
+    //
+    // Add dependency on default VPC deletion
+    //
+    this.addDefaultVpcDependency(vpc, vpcItem);
     return vpc;
   }
 
@@ -603,6 +676,19 @@ export class VpcResources {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Add dependency on deleting the default VPC to reduce risk of exceeding service limits
+   * @param vpc
+   * @param vpcItem
+   * @returns
+   */
+  private addDefaultVpcDependency(vpc: Vpc, vpcItem: VpcConfig | VpcTemplatesConfig): void {
+    if (this.deleteDefaultVpc) {
+      this.stack.addLogs(LogLevel.INFO, `Adding dependency on deletion of the default VPC for ${vpcItem.name}`);
+      vpc.node.addDependency(this.deleteDefaultVpc);
+    }
   }
 
   /**

@@ -29,6 +29,7 @@ import {
   ReplacementsConfig,
   SecurityConfig,
   SecurityConfigValidator,
+  ReplacementsConfigValidator,
 } from '@aws-accelerator/config';
 import { createLogger } from '@aws-accelerator/utils';
 import { Accelerator } from './accelerator';
@@ -72,7 +73,9 @@ if (configDirPath) {
 }
 
 function areReplacementsPresent() {
-  const regex = new RegExp('{{.+}}');
+  // Matches lookup values excluding account lookups such as {{account Management}}
+  // Account lookups do not require existence of replacements-config.yaml file
+  const regex = new RegExp('{{(?!.*(account )).*}}');
   let replacementsPresent = false;
 
   for (const fileName of fileNameList) {
@@ -129,7 +132,8 @@ async function validateConfig(props: {
   let replacementsConfig: ReplacementsConfig | undefined = undefined;
   try {
     replacementsConfig = getReplacementsConfig(configDirPath, accountsConfig!);
-    await replacementsConfig.loadReplacementValues({ region: homeRegion });
+    const isOrgsEnabled = OrganizationConfig.loadRawOrganizationsConfig(configDirPath).enable;
+    await replacementsConfig.loadReplacementValues({ region: homeRegion }, isOrgsEnabled);
   } catch (e) {
     initErrors.push({ file: ReplacementsConfig.FILENAME, message: e });
   }
@@ -189,6 +193,7 @@ async function validateConfig(props: {
   //
   runValidators(
     configDirPath,
+    props.replacementsPresent,
     accountsConfig,
     customizationsConfig,
     globalConfig,
@@ -196,12 +201,13 @@ async function validateConfig(props: {
     networkConfig,
     organizationConfig,
     securityConfig,
+    replacementsConfig,
   );
 
   //
   // Process errors
   //
-  processErrors(initErrors, configErrors);
+  processErrors(initErrors, configErrors, globalConfig?.cdkOptions?.skipStaticValidation ?? false);
 }
 
 /**
@@ -216,6 +222,7 @@ async function validateConfig(props: {
  */
 function runValidators(
   configDirPath: string,
+  replacementsPresent: boolean,
   accountsConfig?: AccountsConfig,
   customizationsConfig?: CustomizationsConfig,
   globalConfig?: GlobalConfig,
@@ -223,6 +230,7 @@ function runValidators(
   networkConfig?: NetworkConfig,
   organizationConfig?: OrganizationConfig,
   securityConfig?: SecurityConfig,
+  replacementsConfig?: ReplacementsConfig,
 ) {
   // Accounts config validator
   if (accountsConfig && organizationConfig) {
@@ -260,9 +268,16 @@ function runValidators(
   }
 
   // Global config validator
-  if (accountsConfig && globalConfig && iamConfig && organizationConfig) {
+  if (accountsConfig && globalConfig && iamConfig && organizationConfig && securityConfig) {
     try {
-      new GlobalConfigValidator(globalConfig, accountsConfig, iamConfig, organizationConfig, configDirPath);
+      new GlobalConfigValidator(
+        globalConfig,
+        accountsConfig,
+        iamConfig,
+        organizationConfig,
+        securityConfig,
+        configDirPath,
+      );
     } catch (e) {
       configErrors.push(e);
     }
@@ -293,6 +308,7 @@ function runValidators(
         globalConfig,
         organizationConfig,
         securityConfig,
+        replacementsConfig,
         configDirPath,
         customizationsConfig,
       );
@@ -304,7 +320,7 @@ function runValidators(
   // Organization config validator
   if (organizationConfig) {
     try {
-      new OrganizationConfigValidator(organizationConfig, configDirPath);
+      new OrganizationConfigValidator(organizationConfig, replacementsConfig, configDirPath);
     } catch (e) {
       configErrors.push(e);
     }
@@ -313,7 +329,22 @@ function runValidators(
   // Security config validator
   if (accountsConfig && globalConfig && organizationConfig && securityConfig) {
     try {
-      new SecurityConfigValidator(securityConfig, accountsConfig, globalConfig, organizationConfig, configDirPath);
+      new SecurityConfigValidator(
+        securityConfig,
+        accountsConfig,
+        globalConfig,
+        organizationConfig,
+        replacementsConfig,
+        configDirPath,
+      );
+    } catch (e) {
+      configErrors.push(e);
+    }
+  }
+
+  if (replacementsPresent && replacementsConfig) {
+    try {
+      new ReplacementsConfigValidator(replacementsConfig, configDirPath);
     } catch (e) {
       configErrors.push(e);
     }
@@ -326,7 +357,7 @@ function runValidators(
  * @param configErrors
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function processErrors(initErrors: { file: string; message: any }[], configErrors: any[]) {
+function processErrors(initErrors: { file: string; message: any }[], configErrors: any[], skipValidation: boolean) {
   if (initErrors.length > 0 || configErrors.length > 0) {
     logger.warn(`Config file validation failed !!!`);
     // Process initial file load errors
@@ -338,7 +369,11 @@ function processErrors(initErrors: { file: string; message: any }[], configError
       logger.warn(configItem);
     });
     // Exit with error code
-    process.exit(1);
+    if (skipValidation) {
+      logger.warn(`Errors found in configuration but ignoring since skipStaticValidation is set to true`);
+    } else {
+      process.exit(1);
+    }
   } else {
     logger.info(`Config file validation successful.`);
   }

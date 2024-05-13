@@ -98,6 +98,38 @@ exports[`SecurityStack Construct(SecurityStack):  Snapshot Test 1`] = `
     },
     "AcceleratorMetadataAwsAcceleratorMetadataCollectionRule1FFE12D2": {
       "Properties": {
+        "EventPattern": {
+          "account": [
+            "111111111111",
+          ],
+          "detail": {
+            "stack-id": [
+              {
+                "Ref": "AWS::StackId",
+              },
+            ],
+            "status-details": {
+              "status": [
+                "CREATE_COMPLETE",
+                "UPDATE_COMPLETE",
+              ],
+            },
+          },
+          "detail-type": [
+            "CloudFormation Stack Status Change",
+          ],
+          "region": [
+            "us-east-1",
+          ],
+          "resources": [
+            {
+              "Ref": "AWS::StackId",
+            },
+          ],
+          "source": [
+            "aws.cloudformation",
+          ],
+        },
         "Name": "AWSAccelerator-metadata-collection-rule",
         "ScheduleExpression": "rate(1 day)",
         "State": "ENABLED",
@@ -1134,7 +1166,6 @@ exports[`SecurityStack Construct(SecurityStack):  Snapshot Test 1`] = `
         "kmsKeyArn": {
           "Ref": "AcceleratorImportedCentralLogBucketKeyLookupCDD7B719",
         },
-        "region": "us-east-1",
       },
       "Type": "Custom::GuardDutyCreatePublishingDestinationCommand",
       "UpdateReplacePolicy": "Delete",
@@ -1206,6 +1237,14 @@ exports[`SecurityStack Construct(SecurityStack):  Snapshot Test 1`] = `
             "enable": true,
             "name": "CIS AWS Foundations Benchmark v1.2.0",
           },
+          {
+            "controlsToDisable": [
+              "1.17",
+              "1.16",
+            ],
+            "enable": true,
+            "name": "CIS AWS Foundations Benchmark v1.4.0",
+          },
         ],
       },
       "Type": "Custom::SecurityHubBatchEnableStandards",
@@ -1215,7 +1254,7 @@ exports[`SecurityStack Construct(SecurityStack):  Snapshot Test 1`] = `
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-SecurityStack-111111111111-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },
@@ -1335,6 +1374,38 @@ exports[`delegatedAdminStack Construct(SecurityStack):  Snapshot Test 1`] = `
     },
     "AcceleratorMetadataAwsAcceleratorMetadataCollectionRule1FFE12D2": {
       "Properties": {
+        "EventPattern": {
+          "account": [
+            "111111111111",
+          ],
+          "detail": {
+            "stack-id": [
+              {
+                "Ref": "AWS::StackId",
+              },
+            ],
+            "status-details": {
+              "status": [
+                "CREATE_COMPLETE",
+                "UPDATE_COMPLETE",
+              ],
+            },
+          },
+          "detail-type": [
+            "CloudFormation Stack Status Change",
+          ],
+          "region": [
+            "us-east-1",
+          ],
+          "resources": [
+            {
+              "Ref": "AWS::StackId",
+            },
+          ],
+          "source": [
+            "aws.cloudformation",
+          ],
+        },
         "Name": "AWSAccelerator-metadata-collection-rule",
         "ScheduleExpression": "rate(1 day)",
         "State": "ENABLED",
@@ -2189,7 +2260,6 @@ exports[`delegatedAdminStack Construct(SecurityStack):  Snapshot Test 1`] = `
         "kmsKeyArn": {
           "Ref": "AcceleratorCentralLogBucketKeyLookup26F8C418",
         },
-        "region": "us-east-1",
       },
       "Type": "Custom::GuardDutyCreatePublishingDestinationCommand",
       "UpdateReplacePolicy": "Delete",
@@ -2270,7 +2340,7 @@ exports[`delegatedAdminStack Construct(SecurityStack):  Snapshot Test 1`] = `
       "Properties": {
         "Name": "/accelerator/AWSAccelerator-SecurityStack-111111111111-us-east-1/version",
         "Type": "String",
-        "Value": "1.5.1",
+        "Value": "1.6.2",
       },
       "Type": "AWS::SSM::Parameter",
     },

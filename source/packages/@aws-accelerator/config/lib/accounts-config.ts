@@ -56,6 +56,7 @@ export class AccountsConfigTypes {
 export class AccountIdConfig implements t.TypeOf<typeof AccountsConfigTypes.accountIdConfig> {
   readonly email: string = '';
   readonly accountId: string = '';
+  readonly status?: string = '';
 }
 
 /**
@@ -349,7 +350,7 @@ export class AccountsConfig implements t.TypeOf<typeof AccountsConfigTypes.accou
 
           page.Accounts?.forEach(item => {
             if (item.Email && item.Id) {
-              this.accountIds?.push({ email: item.Email, accountId: item.Id });
+              this.accountIds?.push({ email: item.Email, accountId: item.Id, status: item.Status });
             }
           });
           nextToken = page.NextToken;
@@ -364,9 +365,7 @@ export class AccountsConfig implements t.TypeOf<typeof AccountsConfigTypes.accou
         // if orgs is disabled, the accountId is read from accounts config.
         //But less than 3 account Ids are provided then throw an error
       } else if (!isOrgsEnabled && (accountsConfig.accountIds ?? []).length < 3) {
-        throw new Error(
-          `Use existing roles is enabled, but the number of accounts in the accounts config is less than 2`,
-        );
+        throw new Error(`Organization is disabled, but the number of accounts in the accounts config is less than 3.`);
       }
     }
   }
@@ -383,8 +382,35 @@ export class AccountsConfig implements t.TypeOf<typeof AccountsConfigTypes.accou
     throw new Error('configuration validation failed.');
   }
 
+  public getAccountNameById(accountId: string): string | undefined {
+    const email = this.accountIds?.find(item => item.accountId === accountId)?.email;
+    const accounts = this.getAccounts(false);
+    const accountName = accounts.find(account => account.email === email)?.name;
+
+    if (accountName) {
+      return accountName;
+    }
+    logger.error(
+      `Account Name not found for ${accountId}. Validate that the emails in the parameter ManagementAccountEmail of the AWSAccelerator-InstallerStack and account configs (accounts-config.yaml) match the correct account emails shown in AWS Organizations.`,
+    );
+    throw new Error('configuration validation failed.');
+  }
+
   public getAccountIds(): string[] {
-    return this.accountIds?.flatMap(item => item.accountId) ?? [];
+    const accountEmails = [...this.mandatoryAccounts, ...this.workloadAccounts].map(account => account.email);
+    const lzaAccounts =
+      this.accountIds?.filter(item => {
+        if (accountEmails.includes(item.email)) {
+          if (!item.status) {
+            return true;
+          }
+          if (item.status === 'ACTIVE') {
+            return true;
+          }
+        }
+        return false;
+      }) ?? [];
+    return lzaAccounts.map(account => account.accountId);
   }
 
   public getAccount(name: string): AccountConfig {

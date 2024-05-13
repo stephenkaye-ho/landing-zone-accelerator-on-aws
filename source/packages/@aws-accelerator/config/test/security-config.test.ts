@@ -36,6 +36,7 @@ import {
   AlarmSetConfig,
   EncryptionConfig,
   LogGroupsConfig,
+  IsPublicSsmDoc,
 } from '../lib/security-config';
 
 describe('SecurityConfig', () => {
@@ -103,4 +104,11 @@ describe('should return right values for correct config', () => {
   );
   const securityConfigFromString = SecurityConfig.loadFromString(buffer);
   expect(securityConfigFromString?.awsConfig.enableConfigurationRecorder).toBe(true);
+});
+
+describe('isPublicSsmDoc', () => {
+  expect(IsPublicSsmDoc('AWSDoc')).toBeFalsy(); // not public doc
+  expect(IsPublicSsmDoc('Doc')).toBeFalsy(); // not public doc
+  expect(IsPublicSsmDoc('AWSAccelerator-Attach-IAM-Instance-Profile')).toBeFalsy(); // not public doc
+  expect(IsPublicSsmDoc('AWS-AWSAccelerator-Attach-IAM-Instance-Profile')).toBeTruthy(); //public doc
 });

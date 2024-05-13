@@ -33,13 +33,13 @@ export interface ActiveDirectoryLogSubscriptionProps {
    */
   readonly activeDirectoryLogRetentionInDays: number;
   /**
-   * Custom resource lambda key to encrypt environment variables
+   * Custom resource lambda key to encrypt environment variables, when undefined default AWS managed key will be used
    */
-  readonly lambdaKmsKey: cdk.aws_kms.IKey;
+  readonly lambdaKmsKey?: cdk.aws_kms.IKey;
   /**
-   * Custom resource lambda log group encryption key
+   * Custom resource lambda log group encryption key, when undefined default AWS managed key will be used
    */
-  readonly cloudWatchLogsKmsKey: cdk.aws_kms.IKey;
+  readonly cloudWatchLogsKmsKey?: cdk.aws_kms.IKey;
   /**
    * Custom resource lambda log retention in days
    */

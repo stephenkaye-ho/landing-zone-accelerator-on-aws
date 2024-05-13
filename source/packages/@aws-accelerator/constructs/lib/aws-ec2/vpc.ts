@@ -70,7 +70,7 @@ export interface SubnetProps {
   readonly basePool?: string[];
   readonly ipamAllocation?: IpamAllocationConfig;
   readonly ipv4CidrBlock?: string;
-  readonly kmsKey?: cdk.aws_kms.Key;
+  readonly kmsKey?: cdk.aws_kms.IKey;
   readonly logRetentionInDays?: number;
   readonly tags?: cdk.CfnTag[];
   readonly outpost?: OutpostsConfig;
@@ -182,11 +182,6 @@ export class Subnet extends SubnetBase {
       if (!props.logRetentionInDays) {
         throw new Error(
           `Error creating subnet ${props.name}: logRetentionInDays property must be defined if not specifying ipv4CidrBlock`,
-        );
-      }
-      if (!props.kmsKey) {
-        throw new Error(
-          `Error creating subnet ${props.name}: kmsKey property must be defined if not specifying ipv4CidrBlock`,
         );
       }
 
@@ -668,10 +663,6 @@ abstract class VpcBase extends cdk.Resource implements IVpc {
 
     // Destination: CloudWatch Logs
     if (options.destinations.includes('cloud-watch-logs')) {
-      if (!options.encryptionKey) {
-        throw new Error('encryptionKey not provided for cwl flow log');
-      }
-
       if (!options.logRetentionInDays) {
         throw new Error('logRetentionInDays not provided for cwl flow log');
       }
@@ -931,9 +922,9 @@ export interface DeleteDefaultSecurityGroupRulesProps {
   readonly vpcId: string;
 
   /**
-   * Custom resource lambda log group encryption key
+   * Custom resource lambda log group encryption key, when undefined default AWS managed key will be used
    */
-  readonly kmsKey: cdk.aws_kms.Key;
+  readonly kmsKey?: cdk.aws_kms.IKey;
   /**
    * Custom resource lambda log retention in days
    */

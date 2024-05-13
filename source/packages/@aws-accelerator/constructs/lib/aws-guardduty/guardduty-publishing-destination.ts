@@ -35,11 +35,11 @@ export interface GuardDutyPublishingDestinationProps {
   /**
    * Publishing destination bucket encryption key
    */
-  readonly destinationKmsKey: cdk.aws_kms.Key;
+  readonly destinationKmsKey: cdk.aws_kms.IKey;
   /**
-   * Custom resource lambda log group encryption key
+   * Custom resource lambda log group encryption key, when undefined default AWS managed key will be used
    */
-  readonly logKmsKey: cdk.aws_kms.Key;
+  readonly logKmsKey?: cdk.aws_kms.IKey;
   /**
    * Custom resource lambda log retention in days
    */
@@ -89,7 +89,6 @@ export class GuardDutyPublishingDestination extends Construct {
       resourceType: RESOURCE_TYPE,
       serviceToken: provider.serviceToken,
       properties: {
-        region: cdk.Stack.of(this).region,
         exportDestinationType: props.exportDestinationType,
         exportDestinationOverride: props.exportDestinationOverride,
         destinationArn: props.destinationArn,

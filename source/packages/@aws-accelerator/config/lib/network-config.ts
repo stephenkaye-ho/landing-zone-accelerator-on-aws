@@ -196,6 +196,7 @@ export class NetworkConfigTypes {
       'gatewayEndpoint',
       'gatewayLoadBalancerEndpoint',
       'networkFirewall',
+      'networkInterface',
       'virtualPrivateGateway',
       'vpcPeering',
     ],
@@ -358,6 +359,7 @@ export class NetworkConfigTypes {
   static readonly securityGroupRuleConfig = t.interface({
     description: t.nonEmptyString,
     types: t.optional(t.array(this.securityGroupRuleTypeEnum)),
+    ipProtocols: t.optional(t.array(t.string)),
     tcpPorts: t.optional(t.array(t.number)),
     udpPorts: t.optional(t.array(t.number)),
     fromPort: t.optional(t.number),
@@ -933,6 +935,7 @@ export class NetworkConfigTypes {
     endpoints: t.array(this.gwlbEndpointConfig),
     subnets: t.array(t.nonEmptyString),
     vpc: t.nonEmptyString,
+    account: t.optional(t.nonEmptyString),
     crossZoneLoadBalancing: t.optional(t.boolean),
     deletionProtection: t.optional(t.boolean),
     targetGroup: t.optional(t.nonEmptyString),
@@ -1000,6 +1003,8 @@ export class NetworkConfigTypes {
     elbAccountIds: t.optional(t.array(this.elbAccountIdsConfig)),
     firewallManagerService: t.optional(this.firewallManagerServiceConfig),
     certificates: t.optional(t.array(this.certificateConfig)),
+    accountVpcIds: t.optional(t.dictionary(t.nonEmptyString, t.array(t.nonEmptyString))),
+    accountVpcEndpointIds: t.optional(t.dictionary(t.nonEmptyString, t.array(t.nonEmptyString))),
   });
 }
 
@@ -2186,6 +2191,23 @@ export class IpamConfig implements t.TypeOf<typeof NetworkConfigTypes.ipamConfig
  *   type: localGateway
  *   target: LocalGateway-A
  * ```
+ *
+ * Network Interface associated with a dynamic lookup:
+ * * **NOTE:** This lookup value is not supported for firewalls defined in {@link Ec2FirewallAutoScalingGroupConfig}. The interface must have the associateElasticIp property set to 'true' or the sourceDestCheck property set to 'false'
+ * ```
+ * - name: EniRoute
+ *   destination: 10.0.0.0/16
+ *   type: networkInterface
+ *   target: ${ACCEL_LOOKUP::EC2:ENI_0:accelerator-firewall:Id}
+ * ```
+ *
+ * Network Interface associated with an explicit ENI Id:
+ * ```
+ * - name: EniRoute
+ *   destination: 10.0.0.0/16
+ *   type: networkInterface
+ *   target: eni-0123456789abcdef
+ *
  */
 export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes.routeTableEntryConfig> {
   /**
@@ -2207,7 +2229,7 @@ export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes
    * @see {@link SubnetConfig} and {@link RouteTableConfig}.
    *
    * Either `destination` or `destinationPrefixList` must be specified for the following route entry types:
-   * `transitGateway`, `natGateway`, `internetGateway`, `vpcPeering`, `virtualPrivateGateway`.
+   * `transitGateway`, `natGateway`, `internetGateway`, `networkInterface`, `vpcPeering`, `virtualPrivateGateway`.
    *
    * `destination` MUST be specified for route entry type `networkFirewall` or `gatewayLoadBalancerEndpoint`.
    *
@@ -2221,7 +2243,7 @@ export class RouteTableEntryConfig implements t.TypeOf<typeof NetworkConfigTypes
    * This is the logical `name` property of the prefix list as defined in network-config.yaml.
    *
    * Either `destination` or `destinationPrefixList` must be specified for the following route entry types:
-   * `transitGateway`, `natGateway`, `internetGateway`, `vpcPeering`, `virtualPrivateGateway`.
+   * `transitGateway`, `natGateway`, `internetGateway`, `networkInterface`, `vpcPeering`, `virtualPrivateGateway`.
    *
    * Cannot be specified for route entry type `networkFirewall` or `gatewayLoadBalancerEndpoint`. Use `destination` instead.
    *
@@ -3245,6 +3267,16 @@ export class PrefixListConfig implements t.TypeOf<typeof NetworkConfigTypes.pref
  *       subnets:
  *         - Network-Endpoints-A
  * ```
+ * IP Protocol:
+ * ```
+ * - description: 'IP Protocol Rule'
+ *   ipProtocols:
+ *     - ESP
+ *     - IDRP
+ *     - ST
+ *   sources:
+ *     - 10.0.0.0/8
+ * ```
  */
 export class SecurityGroupRuleConfig implements t.TypeOf<typeof NetworkConfigTypes.securityGroupRuleConfig> {
   /**
@@ -3314,6 +3346,22 @@ export class SecurityGroupRuleConfig implements t.TypeOf<typeof NetworkConfigTyp
    * {@link SecurityGroupSourceConfig} | {@link PrefixListSourceConfig} | {@link SubnetSourceConfig}
    */
   readonly sources: string[] | SecurityGroupSourceConfig[] | PrefixListSourceConfig[] | SubnetSourceConfig[] = [];
+  /**
+   * (OPTIONAL) An array of custom IP Protocols for the security group rule
+   *
+   * @remarks
+   * Use only IP protocols that aren't either of the following: 'RDP', 'SSH', 'HTTP',  'HTTPS', 'MSSQL',
+   * 'MYSQL/AURORA', 'REDSHIFT', 'POSTGRESQL', 'ORACLE-RDS', 'TCP', 'UDP','ICMP','ALL'.
+   *
+   * For input values, please use values from the `Keyword` column via - https://www.iana.org/assignments/protocol-numbers/protocol-numbers.xhtml
+   *
+   * NOTE: Can only use `ipProtocols` or 'types'. If you need to allow the same source IP address, use multiple ingress/egress
+   * rules.
+   *
+   *
+   *
+   */
+  readonly ipProtocols: string[] = [];
 }
 
 /**
@@ -7239,6 +7287,17 @@ export class GwlbConfig implements t.TypeOf<typeof NetworkConfigTypes.gwlbConfig
    */
   readonly vpc: string = '';
   /**
+   * (OPTIONAL) Set an override for the account the Gateway Load Balancer is deployed to.
+   *
+   * @remarks
+   * This is the `account` property of the VPC referenced in the `vpc` property.
+   *
+   * This value defaults to the value set for the central network services delegated admin account.
+   * Only set this value if you would like your Gateway Load Balancer deployed to an account other than
+   * the configured delegated admin account.
+   */
+  readonly account: string | undefined = undefined;
+  /**
    * (OPTIONAL) Whether to enable cross-zone load balancing.
    */
   readonly crossZoneLoadBalancing: boolean | undefined = undefined;
@@ -7600,6 +7659,23 @@ export class NetworkConfig implements t.TypeOf<typeof NetworkConfigTypes.network
    * Certificate manager configuration
    */
   readonly certificates: CertificateConfig[] | undefined = undefined;
+
+  /**
+   * A map between account Id and all the VPC IDs in the account.
+   *
+   * Currently, the dynamic values will only be loaded in FinalizeStack for SCP finalization.
+   * Only the account VPCs referred in SCPs by ACCEL_LOOKUP will be loaded.
+   */
+  public accountVpcIds: Record<string, string[]> | undefined = undefined;
+
+  /**
+   * A map between account Id and all the VPC Endpoint IDs in the account.
+   *
+   * Currently, the dynamic values will only be loaded in FinalizeStack for SCP finalization.
+   * Only the account VPC Endpoints referred by ACCEL_LOOKUP in SCPs will be loaded.
+   */
+  public accountVpcEndpointIds: Record<string, string[]> | undefined = undefined;
+
   /**
    *
    * @param values

@@ -13,7 +13,7 @@
   "scripts": {
     "cleanup": "tsc --build ./ --clean && rm -rf node_modules && rm -rf yarn.lock && rm -rf dist && rm -rf cdk.out",
     "cleanup:tsc": "tsc --build ./ --clean",
-    "build": "esbuild --minify --bundle --outfile=./dist/index.js --platform=node --target=node16 --external:aws-sdk index.ts",
+    "build": "esbuild --minify --bundle --outfile=./dist/index.js --platform=node --target=node18 --external:aws-sdk index.ts",
     "testreport": "",
     "lint": "eslint --fix  --max-warnings 0 -c ../../../../../../.eslintrc.json '**/*.{ts,tsx}' --ignore-pattern \"*.d.ts\" ",
     "precommit": "eslint --max-warnings 0 -c ../../../../../../.eslintrc.json '**/*.{ts,tsx}' --ignore-pattern \"*.d.ts\" "
@@ -21,9 +21,6 @@
   "devDependencies": {
     "@types/jest": "29.4.0",
     "@types/node": "18.14.0",
-    "@babel/core": "7.21.0",
-    "@babel/preset-env": "7.20.2",
-    "@babel/preset-typescript": "7.21.0",
     "@aws-sdk/types": "3.410.0",
     "aws-sdk-client-mock": "2.1.0",
     "esbuild": "0.17.10",

@@ -108,7 +108,7 @@ export abstract class NetworkStack extends AcceleratorStack {
   /**
    * Cloudwatch KMS key
    */
-  public readonly cloudwatchKey: cdk.aws_kms.Key;
+  public readonly cloudwatchKey: cdk.aws_kms.IKey | undefined;
   /**
    * Flag to determine if there is an advanced VPN in scope of the current stack context
    */
@@ -118,9 +118,9 @@ export abstract class NetworkStack extends AcceleratorStack {
    */
   public readonly advancedVpnTypes: string[] = [];
   /**
-   * KMS Key used to encrypt custom resource lambda environment variables
+   * KMS Key used to encrypt custom resource lambda environment variables, when undefined default AWS managed key will be used
    */
-  public readonly lambdaKey: cdk.aws_kms.Key;
+  public readonly lambdaKey: cdk.aws_kms.IKey | undefined;
   /**
    * Global CloudWatch logs retention setting
    */
@@ -546,10 +546,7 @@ export abstract class NetworkStack extends AcceleratorStack {
         // Get firewall policy ARN
         let policyArn: string;
 
-        if (
-          delegatedAdminAccountId === cdk.Stack.of(this).account ||
-          this.isManagedByAsea(AseaResourceType.NFW, firewallItem.name)
-        ) {
+        if (delegatedAdminAccountId === cdk.Stack.of(this).account) {
           policyArn = cdk.aws_ssm.StringParameter.valueForStringParameter(
             this,
             this.getSsmPath(SsmResourceType.NFW_POLICY, [firewallItem.firewallPolicy]),
@@ -601,7 +598,7 @@ export abstract class NetworkStack extends AcceleratorStack {
     resourceShareName: string,
     itemType: string,
     owningAccountId: string,
-    kmsKey: cdk.aws_kms.Key,
+    kmsKey?: cdk.aws_kms.IKey,
     vpcName?: string,
   ): IResourceShareItem {
     // Generate a logical ID

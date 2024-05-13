@@ -28,11 +28,17 @@ import {
 import { S3Client, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { IAMClient, GetRoleCommand, GetRoleCommandInput } from '@aws-sdk/client-iam';
 import { AccountsConfig, GlobalConfig, OrganizationConfig } from '@aws-accelerator/config';
-import { createLogger, throttlingBackOff, getCrossAccountCredentials } from '@aws-accelerator/utils';
+import {
+  createLogger,
+  throttlingBackOff,
+  getCrossAccountCredentials,
+  setStsTokenPreferences,
+} from '@aws-accelerator/utils';
 import { AssumeProfilePlugin } from '@aws-cdk-extensions/cdk-plugin-assume-role';
 import { isBeforeBootstrapStage } from '../utils/app-utils';
 import { AcceleratorStage } from './accelerator-stage';
 import { AcceleratorToolkit, AcceleratorToolkitProps } from './toolkit';
+import { v4 as uuidv4 } from 'uuid';
 
 const logger = createLogger(['accelerator']);
 
@@ -40,51 +46,6 @@ process.on('uncaughtException', err => {
   logger.error(err);
   throw new Error('Synthesis failed');
 });
-
-/**
- * List of AWS ELB root account and regions mapping
- */
-export const AcceleratorElbRootAccounts: Record<string, string> = {
-  'us-east-1': '127311923021',
-  'us-east-2': '033677994240',
-  'us-west-1': '027434742980',
-  'us-west-2': '797873946194',
-  'af-south-1': '098369216593',
-  'ca-central-1': '985666609251',
-  'eu-central-1': '054676820928',
-  'eu-west-1': '156460612806',
-  'eu-west-2': '652711504416',
-  'eu-south-1': '635631232127',
-  'eu-west-3': '009996457667',
-  'eu-north-1': '897822967062',
-  'ap-east-1': '754344448648',
-  'ap-northeast-1': '582318560864',
-  'ap-northeast-2': '600734575887',
-  'ap-northeast-3': '383597477331',
-  'ap-southeast-1': '114774131450',
-  'ap-southeast-2': '783225319266',
-  'ap-southeast-3': '589379963580',
-  'ap-south-1': '718504428378',
-  'me-south-1': '076674570225',
-  'sa-east-1': '507241528517',
-  'us-gov-west-1': '048591011584',
-  'us-gov-east-1': '190560391635',
-  'cn-north-1': '638102146993',
-  'cn-northwest-1': '037604701340',
-};
-
-export const OptInRegions = [
-  'af-south-1',
-  'ap-east-1',
-  'ap-south-2',
-  'ap-southeast-3',
-  'ap-southeast-4',
-  'eu-central-2',
-  'eu-south-1',
-  'eu-south-2',
-  'me-central-1',
-  'me-south-1',
-];
 
 export const BootstrapVersion = 18;
 
@@ -98,6 +59,7 @@ const stackPrefix = process.env['ACCELERATOR_PREFIX'] ?? 'AWSAccelerator';
  */
 export const AcceleratorStackNames: Record<string, string> = {
   [AcceleratorStage.PREPARE]: `${stackPrefix}-PrepareStack`,
+  [AcceleratorStage.DIAGNOSTICS_PACK]: `${stackPrefix}-DiagnosticsPackStack`,
   [AcceleratorStage.PIPELINE]: `${stackPrefix}-PipelineStack`,
   [AcceleratorStage.TESTER_PIPELINE]: `${stackPrefix}-TesterPipelineStack`,
   [AcceleratorStage.ORGANIZATIONS]: `${stackPrefix}-OrganizationsStack`,
@@ -108,6 +70,7 @@ export const AcceleratorStackNames: Record<string, string> = {
   [AcceleratorStage.DEPENDENCIES]: `${stackPrefix}-DependenciesStack`,
   [AcceleratorStage.SECURITY]: `${stackPrefix}-SecurityStack`,
   [AcceleratorStage.SECURITY_RESOURCES]: `${stackPrefix}-SecurityResourcesStack`,
+  [AcceleratorStage.RESOURCE_POLICY_ENFORCEMENT]: `${stackPrefix}-ResourcePolicyEnforcementStack`,
   [AcceleratorStage.OPERATIONS]: `${stackPrefix}-OperationsStack`,
   [AcceleratorStage.NETWORK_PREP]: `${stackPrefix}-NetworkPrepStack`,
   [AcceleratorStage.NETWORK_VPC]: `${stackPrefix}-NetworkVpcStack`,
@@ -137,6 +100,7 @@ export interface AcceleratorProps {
   readonly proxyAddress?: string;
   readonly enableSingleAccountMode: boolean;
   readonly useExistingRoles: boolean;
+  readonly qualifier?: string;
 }
 let maxStacks = Number(process.env['MAX_CONCURRENT_STACKS'] ?? 250);
 
@@ -169,12 +133,11 @@ export abstract class Accelerator {
     // If not pipeline stage, load global config, management account credentials,
     // and assume role plugin
     //
-    const managementAccountCredentials = !this.isPipelineStage(props.stage)
+    const configDependentStage = this.isConfigDependentStage(props.stage);
+    const managementAccountCredentials = configDependentStage
       ? await this.getManagementAccountCredentials(props.partition)
       : undefined;
-    const globalConfig = !this.isPipelineStage(props.stage)
-      ? GlobalConfig.loadRawGlobalConfig(props.configDirPath)
-      : undefined;
+    const globalConfig = configDependentStage ? GlobalConfig.loadRawGlobalConfig(props.configDirPath) : undefined;
     if (globalConfig?.externalLandingZoneResources?.importExternalLandingZoneResources) {
       logger.info('Loading ASEA mapping for stacks list');
       await globalConfig.loadExternalMapping(true);
@@ -190,21 +153,31 @@ export abstract class Accelerator {
         ? globalConfig?.acceleratorSettings?.maxConcurrentStacks
         : Number(process.env['MAX_CONCURRENT_STACKS'] ?? 250);
     }
-    if (!this.isPipelineStage(props.stage)) {
+    if (this.isConfigDependentStage(props.stage)) {
       const assumeRoleName = setAssumeRoleName({
         stage: props.stage,
         customDeploymentRole: globalConfig?.cdkOptions?.customDeploymentRole,
         command: props.command,
         managementAccountAccessRole: globalConfig?.managementAccountAccessRole,
       });
+      const accountsConfig = AccountsConfig.load(props.configDirPath);
+      const orgsConfig = OrganizationConfig.loadRawOrganizationsConfig(props.configDirPath);
+      await accountsConfig.loadAccountIds(
+        props.partition,
+        props.enableSingleAccountMode,
+        orgsConfig.enable,
+        accountsConfig,
+      );
 
-      await this.initializeAssumeRolePlugin({
-        region: props.region ?? globalRegion,
-        assumeRoleName,
-        partition: props.partition,
-        caBundlePath: props.caBundlePath,
-        credentials: managementAccountCredentials,
-      });
+      if (props.account !== accountsConfig.getManagementAccountId()) {
+        await this.initializeAssumeRolePlugin({
+          region: props.region ?? globalRegion,
+          assumeRoleName,
+          partition: props.partition,
+          caBundlePath: props.caBundlePath,
+          credentials: managementAccountCredentials,
+        });
+      }
     }
     //
     // Set toolkit props
@@ -274,6 +247,11 @@ export abstract class Accelerator {
         id: accountsConfig.getAuditAccountId(),
         name: accountsConfig.getAuditAccount().name,
       };
+      const regionDetails = {
+        homeRegion: globalConfig.homeRegion,
+        globalRegion: globalRegion,
+        enabledRegions: globalConfig.enabledRegions,
+      };
 
       //
       // Execute IMPORT_ASEA_RESOURCES Stage
@@ -311,7 +289,7 @@ export abstract class Accelerator {
         promises,
         accountsConfig,
         logArchiveAccountDetails,
-        globalConfig.enabledRegions,
+        regionDetails,
         maxStacks,
       );
       //
@@ -396,15 +374,22 @@ export abstract class Accelerator {
   }
 
   /**
-   * Returns true if the stage is pipeline or tester pipeline
+   * Returns true if the stage is dependent on config directory, except pipeline, tester-pipeline and diagnostic-pack all stages are config dependent
    * @param stage
    * @returns
    */
-  private static isPipelineStage(stage?: string): boolean {
+  private static isConfigDependentStage(stage?: string): boolean {
     if (!stage) {
+      return true;
+    }
+    if (
+      stage === AcceleratorStage.PIPELINE ||
+      stage === AcceleratorStage.TESTER_PIPELINE ||
+      stage === AcceleratorStage.DIAGNOSTICS_PACK
+    ) {
       return false;
     }
-    return stage === AcceleratorStage.PIPELINE || stage === AcceleratorStage.TESTER_PIPELINE;
+    return true;
   }
 
   private static isSingleStackAction(props: AcceleratorProps) {
@@ -435,7 +420,6 @@ export abstract class Accelerator {
         throw new Error(`CLI command validation failed at runtime.`);
       }
     }
-
     return AcceleratorToolkit.execute({
       accountId: props.account,
       region: props.region,
@@ -698,7 +682,7 @@ export abstract class Accelerator {
     promises: Promise<void>[],
     accountsConfig: AccountsConfig,
     logArchiveAccountDetails: { id: string; name: string; centralizedLoggingRegion: string },
-    enabledRegions: string[],
+    regionDetails: { homeRegion: string; globalRegion: string; enabledRegions: string[] },
     maxStacks: number,
   ) {
     if (toolkitProps.stage === AcceleratorStage.LOGGING) {
@@ -715,7 +699,11 @@ export abstract class Accelerator {
       });
 
       // Execute in all other regions in the LogArchive account
-      await this.executeLogArchiveNonCentralRegions(toolkitProps, logArchiveAccountDetails, enabledRegions);
+      await this.executeLogArchiveNonCentralRegions(
+        toolkitProps,
+        logArchiveAccountDetails,
+        regionDetails.enabledRegions,
+      );
 
       //
       // Execute in all other regions and accounts
@@ -724,9 +712,17 @@ export abstract class Accelerator {
         promises,
         accountsConfig,
         logArchiveAccountDetails,
-        enabledRegions,
+        regionDetails.enabledRegions,
         maxStacks,
       );
+
+      //
+      // Set STS token to version 2 in home region of every account
+      // STS token is vended in homeRegion and queried at globalRegion to ensure v1Token can be used
+      if (toolkitProps.region === regionDetails.homeRegion) {
+        logger.info(`Setting STS token preferences for ${toolkitProps.accountId} in region ${toolkitProps.region}`);
+        await setStsTokenPreferences(toolkitProps.accountId!, regionDetails.globalRegion);
+      }
     }
   }
 
@@ -973,6 +969,7 @@ export async function checkDiffStage(props: AcceleratorProps) {
     AcceleratorStage.ORGANIZATIONS,
     AcceleratorStage.KEY,
     AcceleratorStage.CUSTOMIZATIONS,
+    AcceleratorStage.RESOURCE_POLICY_ENFORCEMENT,
     AcceleratorStage.DEPENDENCIES,
     AcceleratorStage.FINALIZE,
     AcceleratorStage.LOGGING,
@@ -1018,7 +1015,7 @@ export async function checkDiffStage(props: AcceleratorProps) {
  * @param partition
  * @returns
  */
-function setGlobalRegion(partition: string): string {
+export function setGlobalRegion(partition: string): string {
   switch (partition) {
     case 'aws-us-gov':
       return 'us-gov-west-1';
@@ -1188,7 +1185,11 @@ export async function getCentralLogBucketKmsKeyArn(
   accountId: string,
   managementAccountAccessRole: string,
   parameterName: string,
+  orgsEnabled: boolean,
 ): Promise<string> {
+  if (!orgsEnabled) {
+    return uuidv4();
+  }
   const crossAccountCredentials = await getCrossAccountCredentials(
     accountId,
     region,

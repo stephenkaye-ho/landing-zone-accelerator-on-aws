@@ -128,9 +128,9 @@ export class ApplicationsStack extends AcceleratorStack {
     // Set initial private properties
     [this.securityGroupMap, this.subnetMap, this.vpcMap] = this.setInitialMaps(allVpcItems, allAppConfigs);
 
-    const lambdaKey = this.getAcceleratorKey(AcceleratorKeyType.LAMBDA_KEY) as cdk.aws_kms.Key;
+    const lambdaKey = this.getAcceleratorKey(AcceleratorKeyType.LAMBDA_KEY);
 
-    const cloudwatchKey = this.getAcceleratorKey(AcceleratorKeyType.CLOUDWATCH_KEY) as cdk.aws_kms.Key;
+    const cloudwatchKey = this.getAcceleratorKey(AcceleratorKeyType.CLOUDWATCH_KEY);
 
     //Create application config resources
     this.createApplicationConfigResources(
@@ -139,8 +139,8 @@ export class ApplicationsStack extends AcceleratorStack {
       props.configDirPath,
       allVpcItems,
       elbLogsBucketName,
-      lambdaKey,
       { key: cloudwatchKey, logRetentionInDays: this.props.globalConfig.cloudwatchLogRetentionInDays },
+      lambdaKey,
     );
 
     // Create SSM parameters
@@ -199,6 +199,25 @@ export class ApplicationsStack extends AcceleratorStack {
     return [vpcMap, subnetMap, securityGroupMap];
   }
 
+  /**
+   * Function to get Account IDs where VPC is created and subnets are shared to.
+   * @param vpcItem
+   * @returns
+   */
+  private getVpcAccountIdsWithShared(vpcItem: VpcConfig | VpcTemplatesConfig): string[] {
+    const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+    const sharedSubnets = vpcItem.subnets ? vpcItem.subnets.filter(subnet => subnet.shareTargets) : [];
+    for (const subnetItem of sharedSubnets) {
+      const subnetAccountIds = this.getAccountIdsFromShareTarget(subnetItem.shareTargets!);
+      subnetAccountIds.forEach(accountId => {
+        if (!vpcAccountIds.includes(accountId)) {
+          vpcAccountIds.push(accountId);
+        }
+      });
+    }
+    return vpcAccountIds;
+  }
+
   private setInitialMapProcessAppVpcItem(
     vpcItem: VpcConfig | VpcTemplatesConfig,
     vpcMap: Map<string, string>,
@@ -206,7 +225,7 @@ export class ApplicationsStack extends AcceleratorStack {
     securityGroupMap: Map<string, string>,
   ) {
     // Get account IDs
-    const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+    const vpcAccountIds = this.getVpcAccountIdsWithShared(vpcItem);
     if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
       // Set VPC ID
       const vpcId = cdk.aws_ssm.StringParameter.valueForStringParameter(
@@ -240,13 +259,13 @@ export class ApplicationsStack extends AcceleratorStack {
     configDirPath: string,
     allVpcItems: (VpcConfig | VpcTemplatesConfig)[],
     accessLogsBucket: string,
-    lambdaKey: cdk.aws_kms.IKey,
-    cloudwatch: { key: cdk.aws_kms.IKey; logRetentionInDays: number },
+    cloudwatch: { key?: cdk.aws_kms.IKey; logRetentionInDays: number },
+    lambdaKey?: cdk.aws_kms.IKey,
   ) {
     for (const vpcItem of allVpcItems) {
       if (vpcItem.name === appConfigItem.vpc) {
         // Get account IDs
-        const vpcAccountIds = this.getVpcAccountIds(vpcItem);
+        const vpcAccountIds = this.getVpcAccountIdsWithShared(vpcItem);
         if (vpcAccountIds.includes(cdk.Stack.of(this).account) && vpcItem.region === cdk.Stack.of(this).region) {
           // Create target group resource
           const targetGroups = this.createTargetGroup(
@@ -298,8 +317,8 @@ export class ApplicationsStack extends AcceleratorStack {
               targetGroups,
               lt,
               maps.subnetMap,
-              lambdaKey,
               { key: cloudwatch.key, logRetentionInDays: cloudwatch.logRetentionInDays },
+              lambdaKey,
             );
           }
         }
@@ -449,8 +468,8 @@ export class ApplicationsStack extends AcceleratorStack {
     targetGroupsInput: TargetGroupItem[] | undefined,
     lt: LaunchTemplate,
     subnetMap: Map<string, string>,
-    lambdaKey: cdk.aws_kms.IKey,
-    cloudwatch: { key: cdk.aws_kms.IKey; logRetentionInDays: number },
+    cloudwatch: { key?: cdk.aws_kms.IKey; logRetentionInDays: number },
+    lambdaKey?: cdk.aws_kms.IKey,
   ) {
     let finalTargetGroupArns: string[] = [];
     // if input array is provided filter out targetGroup based on name

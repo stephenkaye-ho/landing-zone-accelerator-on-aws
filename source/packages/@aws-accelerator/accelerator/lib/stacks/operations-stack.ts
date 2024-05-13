@@ -38,6 +38,7 @@ import {
   Inventory,
   KeyLookup,
   LimitsDefinition,
+  SsmSessionManagerPolicy,
   UsersGroupsMetadata,
   WarmAccount,
 } from '@aws-accelerator/constructs';
@@ -86,14 +87,19 @@ export class OperationsStack extends AcceleratorStack {
   private users: { [name: string]: cdk.aws_iam.IUser } = {};
 
   /**
-   * KMS Key used to encrypt CloudWatch logs
+   * KMS Key used to encrypt CloudWatch logs, when undefined default AWS managed key will be used
    */
-  private cloudwatchKey: cdk.aws_kms.Key;
+  private cloudwatchKey: cdk.aws_kms.IKey | undefined;
 
   /**
-   * KMS Key used to encrypt custom resource lambda environment variables
+   * KMS Key used to encrypt custom resource lambda environment variables, when undefined default AWS managed key will be used
    */
-  private lambdaKey: cdk.aws_kms.Key;
+  private lambdaKey: cdk.aws_kms.IKey | undefined;
+
+  /**
+   * KMS Key for central S3 Bucket
+   */
+  private centralLogsBucketKey: cdk.aws_kms.IKey;
 
   /**
    * Constructor for OperationsStack
@@ -107,6 +113,7 @@ export class OperationsStack extends AcceleratorStack {
 
     this.cloudwatchKey = this.getAcceleratorKey(AcceleratorKeyType.CLOUDWATCH_KEY);
     this.lambdaKey = this.getAcceleratorKey(AcceleratorKeyType.LAMBDA_KEY);
+    this.centralLogsBucketKey = this.getCentralLogsBucketKey(this.cloudwatchKey);
 
     // Security Services delegated admin account configuration
     // Global decoration for security services
@@ -143,6 +150,14 @@ export class OperationsStack extends AcceleratorStack {
 
       // Create Cross Account Service Catalog Role
       this.createServiceCatalogPropagationRole();
+
+      // Create Session Manager IAM Policy
+      if (
+        this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs ||
+        this.props.globalConfig.logging.sessionManager.sendToS3
+      ) {
+        this.createSessionManagerPolicy();
+      }
 
       // warm account here
       this.warmAccount(props.accountWarming);
@@ -186,6 +201,80 @@ export class OperationsStack extends AcceleratorStack {
     this.addResourceSuppressionsByPath();
 
     this.logger.info('Completed stack synthesis');
+  }
+
+  /*
+   * Create Session Manager IAM Policy and Attach to IAM Role(s)
+   */
+  private createSessionManagerPolicy() {
+    const cloudWatchLogGroupList: string[] = this.getCloudWatchLogGroupList();
+    const sessionManagerCloudWatchLogGroupList: string[] = this.getSessionManagerCloudWatchLogGroupList();
+    const s3BucketList: string[] = this.getS3BucketList();
+
+    // Set up Session Manager Logging
+    const ssmSessionManagerPolicy = new SsmSessionManagerPolicy(this, 'SsmSessionManagerSettings', {
+      roleSets: this.props.iamConfig.roleSets,
+      homeRegion: this.props.globalConfig.homeRegion,
+      s3BucketName: this.centralLogsBucketName,
+      s3BucketKeyArn: this.centralLogsBucketKey.keyArn,
+      sendToCloudWatchLogs: this.props.globalConfig.logging.sessionManager.sendToCloudWatchLogs,
+      sendToS3: this.props.globalConfig.logging.sessionManager.sendToS3,
+      attachPolicyToIamRoles: this.props.globalConfig.logging.sessionManager.attachPolicyToIamRoles,
+      region: cdk.Stack.of(this).region,
+      enabledRegions: this.props.globalConfig.enabledRegions,
+      cloudWatchLogGroupList: cloudWatchLogGroupList ?? undefined,
+      sessionManagerCloudWatchLogGroupList: sessionManagerCloudWatchLogGroupList ?? undefined,
+      s3BucketList: s3BucketList ?? undefined,
+      prefixes: {
+        accelerator: this.props.prefixes.accelerator,
+        ssmLog: this.props.prefixes.ssmLogName,
+      },
+      ssmKeyDetails: {
+        alias: this.acceleratorResourceNames.customerManagedKeys.ssmKey.alias,
+        description: this.acceleratorResourceNames.customerManagedKeys.ssmKey.description,
+      },
+    });
+    const roleNames = this.props.globalConfig.logging.sessionManager.attachPolicyToIamRoles || [];
+    roleNames.forEach(roleName => {
+      const role = this.roles[roleName];
+      if (role) {
+        ssmSessionManagerPolicy.node.addDependency(role);
+      }
+    });
+
+    // AwsSolutions-IAM5: The IAM entity contains wildcard permissions and does not have a cdk_nag rule suppression with evidence for those permission.
+    // rule suppression with evidence for this permission.
+    this.nagSuppressionInputs.push({
+      id: NagSuppressionRuleIds.IAM5,
+      details: [
+        {
+          path: `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Policy/Resource`,
+          reason: 'Policy needed access to all S3 objects for the account to put objects into the access log bucket',
+        },
+      ],
+    });
+
+    // AwsSolutions-IAM4: The IAM user, role, or group uses AWS managed policies.
+    // rule suppression with evidence for this permission.
+    this.nagSuppressionInputs.push({
+      id: NagSuppressionRuleIds.IAM4,
+      details: [
+        {
+          path: `${this.stackName}/SsmSessionManagerSettings/SessionManagerEC2Role/Resource`,
+          reason: 'Create an IAM managed Policy for users to be able to use Session Manager with KMS encryption',
+        },
+      ],
+    });
+
+    this.nagSuppressionInputs.push({
+      id: NagSuppressionRuleIds.IAM5,
+      details: [
+        {
+          path: `/${this.stackName}/SsmSessionManagerSettings/SessionManagerPolicy/Resource`,
+          reason: 'Allows only specific log group',
+        },
+      ],
+    });
   }
 
   /* Enable AWS Service Quota Limits
@@ -700,7 +789,7 @@ export class OperationsStack extends AcceleratorStack {
    * be referenced in AWS Organizations Backup Policies
    */
   private addBackupVaults() {
-    let backupKey: cdk.aws_kms.Key | undefined = undefined;
+    let backupKey: cdk.aws_kms.IKey | undefined = undefined;
     for (const vault of this.props.globalConfig.backup?.vaults ?? []) {
       if (this.isIncluded(vault.deploymentTargets)) {
         // Only create the key if a vault is defined for this account
@@ -745,7 +834,15 @@ export class OperationsStack extends AcceleratorStack {
 
   private enableInventory() {
     this.logger.info('Enabling SSM Inventory');
+    const resourceDataSyncName = `${this.props.prefixes.accelerator}-${cdk.Stack.of(this).account}-Inventory`;
+    const associationName = `${this.props.prefixes.accelerator}-${cdk.Stack.of(this).account}-InventoryCollection`;
 
+    if (
+      this.isManagedByAsea(AseaResourceType.SSM_RESOURCE_DATA_SYNC, resourceDataSyncName) &&
+      this.isManagedByAsea(AseaResourceType.SSM_ASSOCIATION, associationName)
+    ) {
+      return;
+    }
     new Inventory(this, 'AcceleratorSsmInventory', {
       bucketName: this.centralLogsBucketName,
       bucketRegion: this.props.centralizedLoggingRegion,
@@ -791,7 +888,7 @@ export class OperationsStack extends AcceleratorStack {
   private createServiceCatalogPropagationRole() {
     new cdk.aws_iam.Role(this, 'ServiceCatalogPropagationRole', {
       roleName: this.acceleratorResourceNames.roles.crossAccountServiceCatalogPropagation,
-      assumedBy: this.getOrgPrincipals(this.organizationId),
+      assumedBy: this.getOrgPrincipals(this.organizationId, true),
       inlinePolicies: {
         default: new cdk.aws_iam.PolicyDocument({
           statements: [
@@ -1174,7 +1271,7 @@ export class OperationsStack extends AcceleratorStack {
    * @param firewallRoles string[]
    * @returns cdk.aws_kms.Key | undefined
    */
-  private lookupAssetBucketKmsKey(props: AcceleratorStackProps, firewallRoles: string[]): cdk.aws_kms.Key | undefined {
+  private lookupAssetBucketKmsKey(props: AcceleratorStackProps, firewallRoles: string[]): cdk.aws_kms.IKey | undefined {
     if (props.globalConfig.homeRegion === cdk.Stack.of(this).region || firewallRoles.length > 0) {
       return new KeyLookup(this, 'AssetsBucketKms', {
         accountId: this.props.accountsConfig.getManagementAccountId(),
@@ -1193,7 +1290,7 @@ export class OperationsStack extends AcceleratorStack {
    * Create ACM certificate asset bucket access role
    * @param assetBucketKmsKey
    */
-  private createAssetAccessRole(assetBucketKmsKey?: cdk.aws_kms.Key) {
+  private createAssetAccessRole(assetBucketKmsKey?: cdk.aws_kms.IKey) {
     if (!assetBucketKmsKey) {
       throw new Error(
         `Asset bucket KMS key is undefined. KMS key must be defined so permissions can be added to the custom resource role.`,
@@ -1287,26 +1384,38 @@ export class OperationsStack extends AcceleratorStack {
    * Creates a bucket for storing third-party firewall configuration and license files
    * @param props {@link AcceleratorStackProps}
    * @param firewallRoles string[]
-   * @param assetBucketKmsKey cdk.aws_kms.Key | undefined
+   * @param assetBucketKmsKey cdk.aws_kms.IKey | undefined
    * @returns Bucket | undefined
    */
   private createFirewallConfigBucket(
     props: AcceleratorStackProps,
     firewallRoles: string[],
-    assetBucketKmsKey?: cdk.aws_kms.Key,
+    assetBucketKmsKey?: cdk.aws_kms.IKey,
   ): Bucket | undefined {
     if (firewallRoles.length > 0) {
       // Create firewall config bucket
+      const serverAccessLogsBucketName = this.getServerAccessLogsBucketName();
       const firewallConfigBucket = new Bucket(this, 'FirewallConfigBucket', {
         s3BucketName: `${this.acceleratorResourceNames.bucketPrefixes.firewallConfig}-${cdk.Stack.of(this).account}-${
           cdk.Stack.of(this).region
         }`,
-        encryptionType: BucketEncryptionType.SSE_KMS,
-        kmsKey: this.getAcceleratorKey(AcceleratorKeyType.S3_KEY),
-        serverAccessLogsBucketName: `${this.acceleratorResourceNames.bucketPrefixes.s3AccessLogs}-${
-          cdk.Stack.of(this).account
-        }-${cdk.Stack.of(this).region}`,
+        encryptionType: this.isS3CMKEnabled ? BucketEncryptionType.SSE_KMS : BucketEncryptionType.SSE_S3,
+        kmsKey: this.isS3CMKEnabled ? this.getAcceleratorKey(AcceleratorKeyType.S3_KEY)! : undefined,
+        serverAccessLogsBucketName,
       });
+
+      if (!serverAccessLogsBucketName) {
+        // AwsSolutions-S1: The S3 Bucket has server access logs disabled
+        this.nagSuppressionInputs.push({
+          id: NagSuppressionRuleIds.S1,
+          details: [
+            {
+              path: `/${this.stackName}/FirewallConfigBucket/Resource/Resource`,
+              reason: 'Due to configuration settings, server access logs have been disabled.',
+            },
+          ],
+        });
+      }
 
       // Create IAM policy and role for config replacement custom resource
       this.createFirewallConfigCustomResourceRole(props, firewallConfigBucket, assetBucketKmsKey);
@@ -1346,9 +1455,9 @@ export class OperationsStack extends AcceleratorStack {
 
     for (const firewall of firewalls) {
       if (
-        this.isFirewallVpcInScope(vpcResources, firewall) &&
+        this.isFirewallInScope(vpcResources, firewall) &&
         firewall.launchTemplate.iamInstanceProfile &&
-        (firewall.configFile || firewall.licenseFile)
+        (firewall.configFile || firewall.configDir || firewall.licenseFile)
       ) {
         firewallRoles.push(firewall.launchTemplate.iamInstanceProfile);
       }
@@ -1362,26 +1471,30 @@ export class OperationsStack extends AcceleratorStack {
    * @param firewall {@link Ec2FirewallInstanceConfig} | {@link Ec2FirewallAutoScalingGroupConfig}
    * @returns boolean
    */
-  private isFirewallVpcInScope(
+  private isFirewallInScope(
     vpcResources: (VpcConfig | VpcTemplatesConfig)[],
     firewall: Ec2FirewallInstanceConfig | Ec2FirewallAutoScalingGroupConfig,
   ): boolean {
     const vpc = getVpcConfig(vpcResources, firewall.vpc);
     const vpcAccountIds = this.getVpcAccountIds(vpc);
-    return vpcAccountIds.includes(cdk.Stack.of(this).account) && vpc.region === cdk.Stack.of(this).region;
+    // If no account specified in Firewall Config Firewall is in scope of VPC.
+    const instanceAccountIds = firewall.account
+      ? [this.props.accountsConfig.getAccountId(firewall.account)]
+      : vpcAccountIds;
+    return instanceAccountIds.includes(cdk.Stack.of(this).account) && vpc.region === cdk.Stack.of(this).region;
   }
 
   /**
    * Create Lambda custom resource role for firewall config replacements
    * @param props {@link AcceleratorStackProps}
    * @param firewallConfigBucket {@link Bucket}
-   * @param assetBucketKmsKey cdk.aws_kms.Key | undefined
+   * @param assetBucketKmsKey cdk.aws_kms.IKey | undefined
    * @returns cdk.aws_iam.Role
    */
   private createFirewallConfigCustomResourceRole(
     props: AcceleratorStackProps,
     firewallConfigBucket: Bucket,
-    assetBucketKmsKey?: cdk.aws_kms.Key,
+    assetBucketKmsKey?: cdk.aws_kms.IKey,
   ): cdk.aws_iam.Role {
     if (!assetBucketKmsKey) {
       throw new Error(
@@ -1420,6 +1533,21 @@ export class OperationsStack extends AcceleratorStack {
           resources: [
             `arn:${this.partition}:iam::*:role/${this.acceleratorResourceNames.roles.crossAccountVpnRoleName}`,
           ],
+        }),
+        //
+        // secretsmanager:GetSecretValue and kms:Decrypt permissions to management account resources
+        // to apply replacements from management account
+        new cdk.aws_iam.PolicyStatement({
+          effect: cdk.aws_iam.Effect.ALLOW,
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [
+            `arn:${this.partition}:secretsmanager:*:${this.props.accountsConfig.getManagementAccountId()}:secret:*`,
+          ],
+        }),
+        new cdk.aws_iam.PolicyStatement({
+          effect: cdk.aws_iam.Effect.ALLOW,
+          actions: ['kms:Decrypt'],
+          resources: [`arn:${this.partition}:kms:*:${this.props.accountsConfig.getManagementAccountId()}:key/*`],
         }),
       ],
     });
@@ -1502,5 +1630,94 @@ export class OperationsStack extends AcceleratorStack {
         index += 1;
       }
     }
+  }
+
+  /**
+   * Function returns a list of CloudWatch Log Group ARNs
+   */
+  private getCloudWatchLogGroupList(): string[] {
+    const cloudWatchLogGroupListResources: string[] = [];
+    for (const regionItem of this.props.globalConfig.enabledRegions ?? []) {
+      const logGroupItem = `arn:${cdk.Stack.of(this).partition}:logs:${regionItem}:${
+        cdk.Stack.of(this).account
+      }:log-group:*`;
+
+      // Already in the list, skip
+      if (cloudWatchLogGroupListResources.includes(logGroupItem)) {
+        continue;
+      }
+
+      // Exclude regions is not used
+      if (this.props.globalConfig.logging.sessionManager.excludeRegions) {
+        // If exclude regions is defined, ensure not excluded
+        if (!this.props.globalConfig.logging.sessionManager.excludeRegions.includes(regionItem)) {
+          cloudWatchLogGroupListResources.push(logGroupItem);
+        }
+      }
+      // Exclude regions is not being used, add logGroupItem
+      else {
+        cloudWatchLogGroupListResources.push(logGroupItem);
+      }
+    }
+    return cloudWatchLogGroupListResources;
+  }
+
+  /**
+   * Function returns a list of CloudWatch Log Group Name ARNs
+   */
+  private getSessionManagerCloudWatchLogGroupList(): string[] {
+    const logGroupName = `${this.props.prefixes.ssmLogName}-sessionmanager-logs`;
+    const cloudWatchLogGroupListResources: string[] = [];
+    for (const regionItem of this.props.globalConfig.enabledRegions ?? []) {
+      const logGroupItem = `arn:${cdk.Stack.of(this).partition}:logs:${regionItem}:${
+        cdk.Stack.of(this).account
+      }:log-group:${logGroupName}:*`;
+      // Already in the list, skip
+      if (cloudWatchLogGroupListResources.includes(logGroupItem)) {
+        continue;
+      }
+
+      // Exclude regions is not used
+      if (this.props.globalConfig.logging.sessionManager.excludeRegions) {
+        // If exclude regions is defined, ensure not excluded
+        if (!this.props.globalConfig.logging.sessionManager.excludeRegions.includes(regionItem)) {
+          cloudWatchLogGroupListResources.push(logGroupItem);
+        }
+      }
+      // Exclude regions is not being used, add logGroupItem
+      else {
+        cloudWatchLogGroupListResources.push(logGroupItem);
+      }
+    }
+    return cloudWatchLogGroupListResources;
+  }
+
+  /**
+   * Function returns a list of centralized S3 Bucket ARNs
+   */
+  private getS3BucketList(): string[] {
+    const s3BucketResourcesList: string[] = [];
+    for (const regionItem of this.props.globalConfig.enabledRegions ?? []) {
+      const s3Item = `arn:${cdk.Stack.of(this).partition}:s3:::${this.centralLogsBucketName}/session/${
+        cdk.Stack.of(this).account
+      }/${regionItem}/*`;
+      // Already in the list, skip
+      if (s3BucketResourcesList.includes(s3Item)) {
+        continue;
+      }
+
+      // Exclude regions is not used
+      if (this.props.globalConfig.logging.sessionManager.excludeRegions) {
+        // If exclude regions is defined, ensure not excluded
+        if (!this.props.globalConfig.logging.sessionManager.excludeRegions.includes(regionItem)) {
+          s3BucketResourcesList.push(s3Item);
+        }
+      }
+      // Exclude regions is not being used, add s3Item
+      else {
+        s3BucketResourcesList.push(s3Item);
+      }
+    }
+    return s3BucketResourcesList;
   }
 }
